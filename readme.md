@@ -2,7 +2,7 @@
 
 A parser for WebRTC **RtcEventLog** files (the logs Chrome writes from `chrome://webrtc-internals` and native libwebrtc clients produce via `RtcEventLog`) for JavaScript and TypeScript, ported from libwebrtc's `logging/rtc_event_log`.
 
-Status: **work in progress** — the protobuf layer of the new log format decodes and the field encodings (varint, blob and delta encoding) are ported byte-exact; `ParsedRtcEventLog` parses every event type of the new format; RTCP packets are kept raw until the RTCP block parsing lands (see [PORTING_PLAN.md](PORTING_PLAN.md)).
+Status: **work in progress** — the protobuf layer of the new log format decodes and the field encodings (varint, blob and delta encoding) are ported byte-exact; `ParsedRtcEventLog` parses every event type of the new format, including the RTCP blocks (SR/RR, XR, REMB, NACK, PLI, FIR, BYE, loss notification, transport-wide and RFC 8888 congestion control feedback), and `getPacketInfos()` matches RTP packets with their feedback (see [PORTING_PLAN.md](PORTING_PLAN.md)).
 
 ## Upstream revision
 

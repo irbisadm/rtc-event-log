@@ -24,7 +24,10 @@ export {
   getRuntimeProbeFailureReason,
   getRuntimeRtpHeaderExtensionConfig,
   InferredRouteChangeEvent,
+  LoggedIceEvent,
+  LoggedIceEventType,
   LoggedMediaType,
+  LoggedPacketInfo,
   LoggedRtpStreamIncoming,
   LoggedRtpStreamOutgoing,
   LoggedRtpStreamView,
@@ -77,3 +80,29 @@ export {Timestamp} from "./api/units/timestamp.js";
 export {TimeDelta} from "./api/units/time-delta.js";
 export {DataRate} from "./api/units/data-rate.js";
 export {DataSize} from "./api/units/data-size.js";
+export {RtcEventProcessor} from "./logging/rtc-event-log/rtc-event-processor.js";
+export {TypeOrder} from "./logging/rtc-event-log/rtc-event-processor-order.js";
+export {EcnMarking} from "./api/transport/ecn-marking.js";
+export {NtpTime} from "./system-wrappers/include/ntp-time.js";
+export {CommonHeader} from "./modules/rtp-rtcp/source/rtcp-packet/common-header.js";
+export {RtcpPacket} from "./modules/rtp-rtcp/source/rtcp-packet.js";
+export {ReportBlock} from "./modules/rtp-rtcp/source/rtcp-packet/report-block.js";
+export {SenderReport} from "./modules/rtp-rtcp/source/rtcp-packet/sender-report.js";
+export {ReceiverReport} from "./modules/rtp-rtcp/source/rtcp-packet/receiver-report.js";
+export {ExtendedReports} from "./modules/rtp-rtcp/source/rtcp-packet/extended-reports.js";
+export {Rrtr} from "./modules/rtp-rtcp/source/rtcp-packet/rrtr.js";
+export {Dlrr, ReceiveTimeInfo} from "./modules/rtp-rtcp/source/rtcp-packet/dlrr.js";
+export {BitrateItem, TargetBitrate} from "./modules/rtp-rtcp/source/rtcp-packet/target-bitrate.js";
+export {Bye} from "./modules/rtp-rtcp/source/rtcp-packet/bye.js";
+export {Rtpfb} from "./modules/rtp-rtcp/source/rtcp-packet/rtpfb.js";
+export {Psfb} from "./modules/rtp-rtcp/source/rtcp-packet/psfb.js";
+export {Nack} from "./modules/rtp-rtcp/source/rtcp-packet/nack.js";
+export {Pli} from "./modules/rtp-rtcp/source/rtcp-packet/pli.js";
+export {Fir, FirRequest} from "./modules/rtp-rtcp/source/rtcp-packet/fir.js";
+export {Remb} from "./modules/rtp-rtcp/source/rtcp-packet/remb.js";
+export {LossNotification} from "./modules/rtp-rtcp/source/rtcp-packet/loss-notification.js";
+export {ReceivedPacket, TransportFeedback} from "./modules/rtp-rtcp/source/rtcp-packet/transport-feedback.js";
+export {
+  CongestionControlFeedback,
+  CongestionControlPacketInfo,
+} from "./modules/rtp-rtcp/source/rtcp-packet/congestion-control-feedback.js";

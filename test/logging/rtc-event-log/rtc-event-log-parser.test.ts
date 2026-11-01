@@ -169,7 +169,7 @@ describe("ParsedRtcEventLog (new format)", () => {
 
   test("RtcpBatchesRemoveIncomingDuplicatesOnly", () => {
     const a = bytes(0x80, 0xc9, 0x00, 0x01, 0, 0, 0, 1);
-    const b = bytes(0x80, 0xc8, 0x00, 0x01, 0, 0, 0, 2);
+    const b = bytes(0x80, 0xc9, 0x00, 0x01, 0, 0, 0, 2);
     const batch = [
       {timestampMs: 10, packet: a},
       {timestampMs: 11, packet: a}, // duplicate, dropped for incoming
@@ -188,14 +188,14 @@ describe("ParsedRtcEventLog (new format)", () => {
   test("MixedEventTypes", () => {
     const log = concatBytes(
       eventStreamBytes({dtlsWritableStates: [{timestampMs: 5n, writable: true}]}),
-      incomingRtcpBatch([{timestampMs: 6, packet: bytes(1, 2, 3, 4)}]),
+      incomingRtcpBatch([{timestampMs: 6, packet: bytes(0x80, 0xc9, 0x00, 0x01, 1, 2, 3, 4)}]),
     );
     expect(parse(log).incomingRtcpPackets()).toHaveLength(1);
   });
 });
 
 describe("ParsedRtcEventLog errors", () => {
-  const rtcp = incomingRtcpBatch([{timestampMs: 6, packet: bytes(1, 2, 3, 4)}]);
+  const rtcp = incomingRtcpBatch([{timestampMs: 6, packet: bytes(0x80, 0xc9, 0x00, 0x01, 1, 2, 3, 4)}]);
 
   test("TruncatedLog", () => {
     const log = concatBytes(rtcp, rtcp.subarray(0, rtcp.length - 1));

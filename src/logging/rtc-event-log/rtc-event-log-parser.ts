@@ -1,7 +1,7 @@
 // Port of logging/rtc_event_log/rtc_event_log_parser.h @ M154.
 //
 // Status of the port (see PORTING_PLAN.md): all event types of the new
-// (protobuf) format. RTCP payloads are kept raw for now; the legacy and v3
+// (protobuf) format, including the parsed RTCP blocks; the legacy and v3
 // formats are rejected.
 
 import {fromBinary} from "@bufbuild/protobuf";
@@ -9,6 +9,21 @@ import {fromBinary} from "@bufbuild/protobuf";
 import {IceCandidateType} from "../../api/candidate.js";
 import {DtlsTransportState} from "../../api/dtls-transport-interface.js";
 import {AudioLevel, RTPHeader} from "../../api/rtp-headers.js";
+import {TimeDelta} from "../../api/units/time-delta.js";
+import {Bye} from "../../modules/rtp-rtcp/source/rtcp-packet/bye.js";
+import {CommonHeader} from "../../modules/rtp-rtcp/source/rtcp-packet/common-header.js";
+import {CongestionControlFeedback} from "../../modules/rtp-rtcp/source/rtcp-packet/congestion-control-feedback.js";
+import {ExtendedReports} from "../../modules/rtp-rtcp/source/rtcp-packet/extended-reports.js";
+import {Fir} from "../../modules/rtp-rtcp/source/rtcp-packet/fir.js";
+import {Nack} from "../../modules/rtp-rtcp/source/rtcp-packet/nack.js";
+import {Pli} from "../../modules/rtp-rtcp/source/rtcp-packet/pli.js";
+import {Psfb} from "../../modules/rtp-rtcp/source/rtcp-packet/psfb.js";
+import {ReceiverReport} from "../../modules/rtp-rtcp/source/rtcp-packet/receiver-report.js";
+import {Rtpfb} from "../../modules/rtp-rtcp/source/rtcp-packet/rtpfb.js";
+import {SenderReport} from "../../modules/rtp-rtcp/source/rtcp-packet/sender-report.js";
+import {TransportFeedback} from "../../modules/rtp-rtcp/source/rtcp-packet/transport-feedback.js";
+import {compactNtpIntervalToTimeDelta} from "../../modules/rtp-rtcp/source/ntp-time-util.js";
+import {RtpSequenceNumberUnwrapper, RtpTimestampUnwrapper} from "../../rtc-base/numerics/sequence-number-unwrapper.js";
 import {RtpExtension} from "../../api/rtp-parameters.js";
 import {VideoCodecType} from "../../api/video/video-codec-type.js";
 import {AudioEncoderRuntimeConfig} from "../../modules/audio-coding/audio-network-adaptor/include/audio-network-adaptor-config.js";
@@ -97,12 +112,25 @@ import {
 } from "./encoder/rtc-event-log-encoder-common.js";
 import {decodeVarInt} from "./encoder/var-int.js";
 import {
+  LoggedRtcpCongestionControlFeedback,
+  LoggedRtcpPacketBye,
+  LoggedRtcpPacketExtendedReports,
+  LoggedRtcpPacketFir,
   LoggedRtcpPacketIncoming,
+  LoggedRtcpPacketLossNotification,
+  LoggedRtcpPacketNack,
   LoggedRtcpPacketOutgoing,
+  LoggedRtcpPacketPli,
+  LoggedRtcpPacketReceiverReport,
+  LoggedRtcpPacketRemb,
+  LoggedRtcpPacketSenderReport,
+  LoggedRtcpPacketTransportFeedback,
   type LoggedRtpPacket,
   LoggedRtpPacketIncoming,
   LoggedRtpPacketOutgoing,
 } from "./events/logged-rtp-rtcp.js";
+import {RtcEventProcessor} from "./rtc-event-processor.js";
+import {rtcpTypeOrder, rtpTransportSeqNum, rtpTypeOrder, TypeOrder} from "./rtc-event-processor-order.js";
 import {LoggedAlrStateEvent} from "./events/rtc-event-alr-state.js";
 import {LoggedAudioNetworkAdaptationEvent} from "./events/rtc-event-audio-network-adaptation.js";
 import {LoggedAudioPlayoutEvent} from "./events/rtc-event-audio-playout.js";
@@ -142,6 +170,7 @@ const kIpv6Overhead = 40;
 const kUdpOverhead = 8;
 const kSrtpOverhead = 10;
 const kStunOverhead = 4;
+const kDefaultOverhead = kUdpOverhead + kSrtpOverhead + kIpv4Overhead;
 
 const kIncompleteLogError = "Could not parse the entire log. Only the beginning will be used.";
 
@@ -218,6 +247,90 @@ export class LogSegment {
   stopTimeUs(): number {
     return this.stopTimeUsValue;
   }
+}
+
+export class LoggedPacketInfo {
+  ssrc: number;
+  // The RTP header sequence number.
+  streamSeqNo: number;
+  size: number; // uint16_t
+  payloadSize: number; // uint16_t
+  paddingSize: number; // uint16_t
+  overhead = 0;
+  payloadType: number;
+  mediaType: LoggedMediaType = LoggedMediaType.kUnknown;
+  rtx = false;
+  markerBit = false;
+  hasTransportSeqNo = false;
+  lastInFeedback = false;
+  transportSeqNo = 0;
+  // The RTP header timestamp unwrapped and converted from tick count to seconds
+  // based timestamp.
+  captureTime: Timestamp;
+  // The time the packet was logged. This is the receive time for incoming
+  // packets and send time for outgoing.
+  logPacketTime: Timestamp;
+  // Send time as reported by abs-send-time extension, For outgoing packets this
+  // corresponds to log_packet_time, but might be measured using another clock.
+  reportedSendTime: Timestamp;
+  // The receive time that was reported in feedback. For incoming packets this
+  // corresponds to log_packet_time, but might be measured using another clock.
+  // PlusInfinity indicates that the packet was lost.
+  reportedRecvTime: Timestamp = Timestamp.minusInfinity();
+  // The time feedback message was logged. This is the feedback send time for
+  // incoming packets and feedback receive time for outgoing.
+  // PlusInfinity indicates that feedback was expected but not received.
+  logFeedbackTime: Timestamp = Timestamp.minusInfinity();
+  // The delay between receiving an RTP packet and sending feedback for
+  // incoming packets. For outgoing packets we don't know the feedback send
+  // time, and this is instead calculated as the difference in reported receive
+  // time between this packet and the last packet in the same feedback message.
+  feedbackHoldDuration: TimeDelta = -Infinity;
+
+  constructor(rtp: LoggedRtpPacket, mediaType: LoggedMediaType, rtx: boolean, captureTime: Timestamp) {
+    this.ssrc = rtp.header.ssrc;
+    this.streamSeqNo = rtp.header.sequenceNumber;
+    this.size = rtp.totalLength & 0xffff;
+    this.payloadSize = (rtp.totalLength - rtp.header.paddingLength - rtp.header.headerLength) & 0xffff;
+    this.paddingSize = rtp.header.paddingLength & 0xffff;
+    this.payloadType = rtp.header.payloadType;
+    this.mediaType = mediaType;
+    this.rtx = rtx;
+    this.markerBit = rtp.header.markerBit;
+    this.hasTransportSeqNo = rtp.header.extension.hasTransportSequenceNumber;
+    this.transportSeqNo = this.hasTransportSeqNo ? rtp.header.extension.transportSequenceNumber : 0;
+    this.captureTime = captureTime;
+    this.logPacketTime = Timestamp.micros(rtp.logTimeUs());
+    this.reportedSendTime = rtp.header.extension.hasAbsoluteSendTime
+      ? rtp.header.extension.getAbsoluteSendTimestamp()
+      : Timestamp.minusInfinity();
+  }
+
+  logTimeMs(): number {
+    return Timestamp.ms(this.logPacketTime);
+  }
+  logTimeUs(): number {
+    return Timestamp.us(this.logPacketTime);
+  }
+}
+
+export enum LoggedIceEventType {
+  kAdded,
+  kUpdated,
+  kDestroyed,
+  kSelected,
+  kCheckSent,
+  kCheckReceived,
+  kCheckResponseSent,
+  kCheckResponseReceived,
+}
+
+export class LoggedIceEvent {
+  constructor(
+    public candidatePairId: number,
+    public logTime: Timestamp,
+    public eventType: LoggedIceEventType,
+  ) {}
 }
 
 export class InferredRouteChangeEvent {
@@ -483,6 +596,114 @@ function pushToMap<T>(map: Map<number, T[]>, key: number, value: T): void {
 // std::map iterates in key order.
 function sortedByKey<T>(map: Map<number, T>): Map<number, T> {
   return new Map([...map.entries()].sort((a, b) => a[0] - b[0]));
+}
+
+class MediaStreamInfo {
+  unwrapCaptureTicks = new RtpTimestampUnwrapper();
+
+  constructor(
+    public mediaType: LoggedMediaType = LoggedMediaType.kUnknown,
+    public rtx = false,
+  ) {}
+}
+
+interface OverheadChangeEvent {
+  timestamp: Timestamp;
+  overhead: number;
+}
+
+function getOverheadChangingEvents(
+  routeChanges: readonly InferredRouteChangeEvent[],
+  direction: PacketDirection,
+): OverheadChangeEvent[] {
+  const overheads: OverheadChangeEvent[] = [];
+  for (const event of routeChanges) {
+    const newOverhead = direction === PacketDirection.kIncomingPacket ? event.returnOverhead : event.sendOverhead;
+    if (overheads.length === 0 || newOverhead !== overheads[overheads.length - 1].overhead) {
+      overheads.push({timestamp: event.logTime, overhead: newOverhead});
+    }
+  }
+  return overheads;
+}
+
+class RtcpBlockLists {
+  sr: LoggedRtcpPacketSenderReport[] = [];
+  rr: LoggedRtcpPacketReceiverReport[] = [];
+  xr: LoggedRtcpPacketExtendedReports[] = [];
+  remb: LoggedRtcpPacketRemb[] = [];
+  nack: LoggedRtcpPacketNack[] = [];
+  fir: LoggedRtcpPacketFir[] = [];
+  pli: LoggedRtcpPacketPli[] = [];
+  bye: LoggedRtcpPacketBye[] = [];
+  transportFeedback: LoggedRtcpPacketTransportFeedback[] = [];
+  congestionFeedback: LoggedRtcpCongestionControlFeedback[] = [];
+  lossNotification: LoggedRtcpPacketLossNotification[] = [];
+}
+
+function storeRtcpBlocks(timestampUs: number, packet: Uint8Array, lists: RtcpBlockLists): ParseStatus {
+  const timestamp = Timestamp.micros(timestampUs);
+  const header = new CommonHeader();
+  for (let block = 0; block < packet.length; block += header.nextPacketOffset()) {
+    if (!header.parse(packet.subarray(block))) return ParseStatus.error("header.Parse(block, packet_end - block)");
+
+    if (header.type() === TransportFeedback.kPacketType && header.fmt() === TransportFeedback.kFeedbackMessageType) {
+      const parsedBlock = new LoggedRtcpPacketTransportFeedback(timestamp);
+      if (!parsedBlock.transportFeedback.parse(header)) {
+        return ParseStatus.error("parsed_block.transport_feedback.Parse(header)");
+      }
+      lists.transportFeedback.push(parsedBlock);
+    } else if (header.type() === Rtpfb.kPacketType && header.fmt() === CongestionControlFeedback.kFeedbackMessageType) {
+      const feedback = new CongestionControlFeedback();
+      if (!feedback.parse(header)) return ParseStatus.error("feedback.Parse(header)");
+      lists.congestionFeedback.push(new LoggedRtcpCongestionControlFeedback(timestamp, feedback));
+    } else if (header.type() === SenderReport.kPacketType) {
+      const parsedBlock = new LoggedRtcpPacketSenderReport(timestamp);
+      if (!parsedBlock.sr.parse(header)) return ParseStatus.error("parsed_block.sr.Parse(header)");
+      lists.sr.push(parsedBlock);
+    } else if (header.type() === ReceiverReport.kPacketType) {
+      const parsedBlock = new LoggedRtcpPacketReceiverReport(timestamp);
+      if (!parsedBlock.rr.parse(header)) return ParseStatus.error("parsed_block.rr.Parse(header)");
+      lists.rr.push(parsedBlock);
+    } else if (header.type() === ExtendedReports.kPacketType) {
+      const parsedBlock = new LoggedRtcpPacketExtendedReports(timestamp);
+      if (!parsedBlock.xr.parse(header)) return ParseStatus.error("parsed_block.xr.Parse(header)");
+      lists.xr.push(parsedBlock);
+    } else if (header.type() === Fir.kPacketType && header.fmt() === Fir.kFeedbackMessageType) {
+      const parsedBlock = new LoggedRtcpPacketFir(timestamp);
+      if (!parsedBlock.fir.parse(header)) return ParseStatus.error("parsed_block.fir.Parse(header)");
+      lists.fir.push(parsedBlock);
+    } else if (header.type() === Pli.kPacketType && header.fmt() === Pli.kFeedbackMessageType) {
+      const parsedBlock = new LoggedRtcpPacketPli(timestamp);
+      if (!parsedBlock.pli.parse(header)) return ParseStatus.error("parsed_block.pli.Parse(header)");
+      lists.pli.push(parsedBlock);
+    } else if (header.type() === Bye.kPacketType) {
+      const parsedBlock = new LoggedRtcpPacketBye(timestamp);
+      if (!parsedBlock.bye.parse(header)) return ParseStatus.error("parsed_block.bye.Parse(header)");
+      lists.bye.push(parsedBlock);
+    } else if (header.type() === Psfb.kPacketType && header.fmt() === Psfb.kAfbMessageType) {
+      let typeFound = false;
+      if (!typeFound) {
+        const parsedBlock = new LoggedRtcpPacketRemb(timestamp);
+        if (parsedBlock.remb.parse(header)) {
+          lists.remb.push(parsedBlock);
+          typeFound = true;
+        }
+      }
+      if (!typeFound) {
+        const parsedBlock = new LoggedRtcpPacketLossNotification(timestamp);
+        if (parsedBlock.lossNotification.parse(header)) {
+          lists.lossNotification.push(parsedBlock);
+          typeFound = true;
+        }
+      }
+      // We ignore other application-layer feedback types.
+    } else if (header.type() === Nack.kPacketType && header.fmt() === Nack.kFeedbackMessageType) {
+      const parsedBlock = new LoggedRtcpPacketNack(timestamp);
+      if (!parsedBlock.nack.parse(header)) return ParseStatus.error("parsed_block.nack.Parse(header)");
+      lists.nack.push(parsedBlock);
+    }
+  }
+  return ParseStatus.success();
 }
 
 type RtpPacketsProto = IncomingRtpPackets | OutgoingRtpPackets;
@@ -892,6 +1113,8 @@ export class ParsedRtcEventLog {
 
   private incomingRtcpPacketsValue: LoggedRtcpPacketIncoming[] = [];
   private outgoingRtcpPacketsValue: LoggedRtcpPacketOutgoing[] = [];
+  private incomingRtcp = new RtcpBlockLists();
+  private outgoingRtcp = new RtcpBlockLists();
 
   private startLogEventsValue: LoggedStartEvent[] = [];
   private stopLogEventsValue: LoggedStopEvent[] = [];
@@ -958,6 +1181,8 @@ export class ParsedRtcEventLog {
 
     this.incomingRtcpPacketsValue = [];
     this.outgoingRtcpPacketsValue = [];
+    this.incomingRtcp = new RtcpBlockLists();
+    this.outgoingRtcp = new RtcpBlockLists();
 
     this.startLogEventsValue = [];
     this.stopLogEventsValue = [];
@@ -1058,6 +1283,17 @@ export class ParsedRtcEventLog {
           stream.outgoingPackets.map((packet) => packet.rtp),
         ),
       );
+    }
+
+    // Set up convenience wrappers around the most commonly used RTCP types.
+    for (const incoming of this.incomingRtcpPacketsValue) {
+      const storeRtcpStatus = storeRtcpBlocks(incoming.rtcp.timestamp, incoming.rtcp.rawData, this.incomingRtcp);
+      if (!storeRtcpStatus.ok()) return storeRtcpStatus;
+    }
+
+    for (const outgoing of this.outgoingRtcpPacketsValue) {
+      const storeRtcpStatus = storeRtcpBlocks(outgoing.rtcp.timestamp, outgoing.rtcp.rawData, this.outgoingRtcp);
+      if (!storeRtcpStatus.ok()) return storeRtcpStatus;
     }
 
     // Store first and last timestamp events that might happen before the call
@@ -1283,6 +1519,334 @@ export class ParsedRtcEventLog {
 
   remoteEstimateEvents(): readonly LoggedRemoteEstimateEvent[] {
     return this.remoteEstimateEventsValue;
+  }
+
+  // Parsed RTCP blocks.
+  private rtcpLists(direction: PacketDirection): RtcpBlockLists {
+    return direction === PacketDirection.kIncomingPacket ? this.incomingRtcp : this.outgoingRtcp;
+  }
+
+  receiverReports(direction: PacketDirection): readonly LoggedRtcpPacketReceiverReport[] {
+    return this.rtcpLists(direction).rr;
+  }
+  senderReports(direction: PacketDirection): readonly LoggedRtcpPacketSenderReport[] {
+    return this.rtcpLists(direction).sr;
+  }
+  extendedReports(direction: PacketDirection): readonly LoggedRtcpPacketExtendedReports[] {
+    return this.rtcpLists(direction).xr;
+  }
+  nacks(direction: PacketDirection): readonly LoggedRtcpPacketNack[] {
+    return this.rtcpLists(direction).nack;
+  }
+  rembs(direction: PacketDirection): readonly LoggedRtcpPacketRemb[] {
+    return this.rtcpLists(direction).remb;
+  }
+  firs(direction: PacketDirection): readonly LoggedRtcpPacketFir[] {
+    return this.rtcpLists(direction).fir;
+  }
+  plis(direction: PacketDirection): readonly LoggedRtcpPacketPli[] {
+    return this.rtcpLists(direction).pli;
+  }
+  byes(direction: PacketDirection): readonly LoggedRtcpPacketBye[] {
+    return this.rtcpLists(direction).bye;
+  }
+  transportFeedbacks(direction: PacketDirection): readonly LoggedRtcpPacketTransportFeedback[] {
+    return this.rtcpLists(direction).transportFeedback;
+  }
+  congestionFeedback(direction: PacketDirection): readonly LoggedRtcpCongestionControlFeedback[] {
+    return this.rtcpLists(direction).congestionFeedback;
+  }
+  lossNotifications(direction: PacketDirection): readonly LoggedRtcpPacketLossNotification[] {
+    return this.rtcpLists(direction).lossNotification;
+  }
+
+  getIncomingPacketInfos(): LoggedPacketInfo[] {
+    return this.getPacketInfos(PacketDirection.kIncomingPacket);
+  }
+
+  getOutgoingPacketInfos(): LoggedPacketInfo[] {
+    return this.getPacketInfos(PacketDirection.kOutgoingPacket);
+  }
+
+  getPacketInfos(direction: PacketDirection): LoggedPacketInfo[] {
+    const streams = new Map<number, MediaStreamInfo>();
+    // std::map::insert: an existing entry is kept.
+    const insertStream = (ssrc: number, info: MediaStreamInfo) => {
+      if (!streams.has(ssrc)) streams.set(ssrc, info);
+    };
+    if (direction === PacketDirection.kIncomingPacket) {
+      for (const [configs, mediaType] of [
+        [this.audioRecvConfigsValue, LoggedMediaType.kAudio],
+        [this.videoRecvConfigsValue, LoggedMediaType.kVideo],
+      ] as const) {
+        for (const conf of configs) {
+          insertStream(conf.config.remoteSsrc, new MediaStreamInfo(mediaType, false));
+          if (conf.config.rtxSsrc !== 0) insertStream(conf.config.rtxSsrc, new MediaStreamInfo(mediaType, true));
+        }
+      }
+    } else if (direction === PacketDirection.kOutgoingPacket) {
+      for (const [configs, mediaType] of [
+        [this.audioSendConfigsValue, LoggedMediaType.kAudio],
+        [this.videoSendConfigsValue, LoggedMediaType.kVideo],
+      ] as const) {
+        for (const conf of configs) {
+          insertStream(conf.config.localSsrc, new MediaStreamInfo(mediaType, false));
+          if (conf.config.rtxSsrc !== 0) insertStream(conf.config.rtxSsrc, new MediaStreamInfo(mediaType, true));
+        }
+      }
+    }
+
+    const overheads = getOverheadChangingEvents(this.getRouteChanges(), direction);
+    let overheadIter = 0;
+
+    const packets: LoggedPacketInfo[] = [];
+    // unwrapped transport sequence number -> index into packets
+    let twccIndices = new Map<number, number>();
+    const transportSeqNumUnwrapper = new RtpSequenceNumberUnwrapper();
+
+    class PerSSRCInfo {
+      private rtpSeqNumUnwrapper = new RtpSequenceNumberUnwrapper();
+      // unwrapped rtp sequence number -> index into packets
+      private packetIndices = new Map<number, number>();
+
+      addPacketIndex(rtpSequenceNumber: number, index: number): void {
+        this.packetIndices.set(this.rtpSeqNumUnwrapper.unwrap(rtpSequenceNumber), index);
+      }
+
+      findPacketIndex(rtpSequenceNumber: number): number | undefined {
+        return this.packetIndices.get(this.rtpSeqNumUnwrapper.unwrap(rtpSequenceNumber));
+      }
+    }
+    let ccfbIndices = new Map<number, PerSSRCInfo>();
+    const ccfbInfo = (ssrc: number): PerSSRCInfo => {
+      let info = ccfbIndices.get(ssrc);
+      if (info === undefined) {
+        info = new PerSSRCInfo();
+        ccfbIndices.set(ssrc, info);
+      }
+      return info;
+    };
+
+    let currentOverhead = kDefaultOverhead;
+    let lastLogTime = Timestamp.zero();
+
+    const advanceTime = (newLogTime: Timestamp) => {
+      if (overheadIter !== overheads.length && newLogTime >= overheads[overheadIter].timestamp) {
+        currentOverhead = overheads[overheadIter].overhead;
+        ++overheadIter;
+      }
+      // If we have a large time delta, it can be caused by a gap in logging,
+      // therefore we don't want to match up sequence numbers as we might have had
+      // a wraparound.
+      if (newLogTime - lastLogTime > TimeDelta.millis(30_000)) {
+        transportSeqNumUnwrapper.reset();
+        twccIndices = new Map();
+        ccfbIndices = new Map();
+      }
+      lastLogTime = newLogTime;
+    };
+
+    const rtpHandler = (rtp: LoggedRtpPacket) => {
+      advanceTime(rtp.logTime());
+      let stream = streams.get(rtp.header.ssrc);
+      if (stream === undefined) {
+        stream = new MediaStreamInfo();
+        streams.set(rtp.header.ssrc, stream);
+      }
+      let captureTime = Timestamp.minusInfinity();
+      if (!stream.rtx) {
+        // RTX copy the timestamp of the retransmitted packets. This means that
+        // RTX streams don't have a unique clock offset and frequency, so
+        // the RTP timstamps can't be unwrapped.
+
+        // Add an offset to avoid `capture_ticks` to become negative in the case
+        // of reordering.
+        const kStartingCaptureTimeTicks = 90 * 48 * 10000;
+        const captureTicks = kStartingCaptureTimeTicks + stream.unwrapCaptureTicks.unwrap(rtp.header.timestamp);
+        // TODO(srte): Use logged sample rate when it is added to the format.
+        const seconds = captureTicks / (stream.mediaType === LoggedMediaType.kAudio ? 48000.0 : 90000.0);
+        captureTime = Math.trunc(seconds * 1000000);
+      }
+      const logged = new LoggedPacketInfo(rtp, stream.mediaType, stream.rtx, captureTime);
+      logged.overhead = currentOverhead;
+      if (logged.hasTransportSeqNo) {
+        logged.logFeedbackTime = Timestamp.plusInfinity();
+        const unwrappedSeqNum = transportSeqNumUnwrapper.unwrap(logged.transportSeqNo);
+        // (Upstream logs a warning on a repeated sequence number.)
+        twccIndices.set(unwrappedSeqNum, packets.length);
+      } else {
+        ccfbInfo(rtp.header.ssrc).addPacketIndex(rtp.header.sequenceNumber, packets.length);
+      }
+      packets.push(logged);
+    };
+
+    let twccFeedbackBaseTime = Timestamp.minusInfinity();
+    let twccLastFeedbackBaseTime = Timestamp.minusInfinity();
+
+    const twccFeedbackHandler = (loggedRtcp: LoggedRtcpPacketTransportFeedback) => {
+      const logFeedbackTime = loggedRtcp.logTime();
+      advanceTime(logFeedbackTime);
+      const feedback = loggedRtcp.transportFeedback;
+      // Add timestamp deltas to a local time base selected on first packet
+      // arrival. This won't be the true time base, but makes it easier to
+      // manually inspect time stamps.
+      if (!Timestamp.isFinite(twccLastFeedbackBaseTime)) {
+        twccFeedbackBaseTime = logFeedbackTime;
+      } else {
+        twccFeedbackBaseTime += feedback.getBaseDelta(twccLastFeedbackBaseTime);
+      }
+      twccLastFeedbackBaseTime = feedback.baseTime();
+
+      const packetFeedbacks: LoggedPacketInfo[] = [];
+      feedback.forAllPackets((sequenceNumber, deltaSinceBase) => {
+        const unwrappedSeqNum = transportSeqNumUnwrapper.unwrap(sequenceNumber);
+        const index = twccIndices.get(unwrappedSeqNum);
+        if (index === undefined) {
+          // Feedback for an unknown packet (upstream logs a warning).
+          return;
+        }
+        const sent = packets[index];
+        if (logFeedbackTime - sent.logPacketTime > TimeDelta.millis(60_000)) {
+          // Received very late feedback, possibly due to wraparound.
+          return;
+        }
+        if (Number.isFinite(deltaSinceBase)) {
+          if (!Number.isFinite(sent.reportedRecvTime)) {
+            sent.reportedRecvTime = twccFeedbackBaseTime + deltaSinceBase;
+            sent.logFeedbackTime = logFeedbackTime;
+          }
+        } else {
+          if (!Number.isFinite(sent.reportedRecvTime) && !Number.isFinite(sent.logFeedbackTime)) {
+            sent.reportedRecvTime = Timestamp.plusInfinity();
+            sent.logFeedbackTime = logFeedbackTime;
+          }
+        }
+        packetFeedbacks.push(sent);
+      });
+      if (packetFeedbacks.length === 0) return;
+      const last = packetFeedbacks[packetFeedbacks.length - 1];
+      last.lastInFeedback = true;
+      for (const fb of packetFeedbacks) {
+        if (direction === PacketDirection.kOutgoingPacket) {
+          if (Number.isFinite(last.reportedRecvTime) && Number.isFinite(fb.reportedRecvTime)) {
+            fb.feedbackHoldDuration = last.reportedRecvTime - fb.reportedRecvTime;
+          }
+        } else {
+          fb.feedbackHoldDuration = logFeedbackTime - fb.logPacketTime;
+        }
+      }
+    };
+
+    let ccfbFeedbackOffset = Timestamp.minusInfinity();
+    let lastFeedbackCompactNtpTime: number | undefined = undefined;
+    const ccfbFeedbackHandler = (loggedRtcp: LoggedRtcpCongestionControlFeedback) => {
+      const logFeedbackTime = loggedRtcp.logTime();
+      advanceTime(logFeedbackTime);
+      const feedback = loggedRtcp.congestionFeedback;
+      if (!Number.isFinite(ccfbFeedbackOffset)) {
+        ccfbFeedbackOffset = logFeedbackTime;
+      }
+      const feedbackDelta =
+        lastFeedbackCompactNtpTime !== undefined
+          ? compactNtpIntervalToTimeDelta((feedback.reportTimestampCompactNtp() - lastFeedbackCompactNtpTime) >>> 0)
+          : 0;
+      lastFeedbackCompactNtpTime = feedback.reportTimestampCompactNtp();
+      if (feedbackDelta < TimeDelta.millis(-5000)) {
+        // Unexpected feedback ntp time delta (upstream logs a warning).
+        ccfbFeedbackOffset = logFeedbackTime;
+      } else {
+        ccfbFeedbackOffset += feedbackDelta;
+      }
+      for (const packet of feedback.packets()) {
+        const packetsIndex = ccfbInfo(packet.ssrc).findPacketIndex(packet.sequenceNumber);
+        if (packetsIndex === undefined) {
+          // Feedback for an unknown packet (upstream logs a warning).
+          continue;
+        }
+        const sent = packets[packetsIndex];
+        if (logFeedbackTime - sent.logPacketTime > TimeDelta.millis(60_000)) {
+          // Received very late feedback, possibly due to wraparound. Like
+          // upstream, this ends the processing of the whole feedback message.
+          return;
+        }
+        if (Number.isFinite(packet.arrivalTimeOffset)) {
+          if (!Number.isFinite(sent.reportedRecvTime)) {
+            sent.logFeedbackTime = logFeedbackTime;
+            sent.feedbackHoldDuration = packet.arrivalTimeOffset;
+            sent.reportedRecvTime = ccfbFeedbackOffset - packet.arrivalTimeOffset;
+          }
+        } else {
+          if (!Number.isFinite(sent.logFeedbackTime)) {
+            sent.logFeedbackTime = logFeedbackTime;
+            sent.reportedRecvTime = Timestamp.plusInfinity();
+          }
+        }
+      }
+    };
+
+    const process = new RtcEventProcessor();
+    for (const rtpPackets of this.rtpPacketsBySsrc(direction)) {
+      process.addEvents(rtpPackets.packetView, rtpHandler, rtpTypeOrder(direction), rtpTransportSeqNum);
+    }
+    if (direction === PacketDirection.kOutgoingPacket) {
+      process.addEvents(this.incomingRtcp.transportFeedback, twccFeedbackHandler, rtcpTypeOrder(PacketDirection.kIncomingPacket));
+      process.addEvents(this.incomingRtcp.congestionFeedback, ccfbFeedbackHandler, rtcpTypeOrder(PacketDirection.kIncomingPacket));
+    } else {
+      process.addEvents(this.outgoingRtcp.transportFeedback, twccFeedbackHandler, rtcpTypeOrder(PacketDirection.kOutgoingPacket));
+      process.addEvents(this.outgoingRtcp.congestionFeedback, ccfbFeedbackHandler, rtcpTypeOrder(PacketDirection.kOutgoingPacket));
+    }
+    process.processEventsInOrder();
+
+    if (ccfbIndices.size !== 0) {
+      // The log stores RTP packets by stream (with millisecond timestamps), but
+      // doesn't guarantee the order between packets sent or received at the same
+      // time on different SSRCs. We don't have transport sequence numbers when
+      // CCFB is used, so the order can't be reconstructed using those.
+      // process.ProcessEventsInOrder() will set log feedback time per packet
+      // based on when feedback was originally received/sent for a packet, and we
+      // can use that to ensure packets are at least ordered as originally seen in
+      // feedback.
+      // (Array.prototype.sort is stable, like std::stable_sort.)
+      packets.sort((a, b) => {
+        if (a.logPacketTime === b.logPacketTime) {
+          return a.logFeedbackTime < b.logFeedbackTime ? -1 : a.logFeedbackTime > b.logFeedbackTime ? 1 : 0;
+        }
+        return a.logPacketTime < b.logPacketTime ? -1 : 1;
+      });
+    }
+    return packets;
+  }
+
+  getIceEvents(): LoggedIceEvent[] {
+    const checkMap = new Map<IceCandidatePairEventType, LoggedIceEventType>([
+      [IceCandidatePairEventType.kCheckSent, LoggedIceEventType.kCheckSent],
+      [IceCandidatePairEventType.kCheckReceived, LoggedIceEventType.kCheckReceived],
+      [IceCandidatePairEventType.kCheckResponseSent, LoggedIceEventType.kCheckResponseSent],
+      [IceCandidatePairEventType.kCheckResponseReceived, LoggedIceEventType.kCheckResponseReceived],
+    ]);
+    const configMap = new Map<IceCandidatePairConfigType, LoggedIceEventType>([
+      [IceCandidatePairConfigType.kAdded, LoggedIceEventType.kAdded],
+      [IceCandidatePairConfigType.kUpdated, LoggedIceEventType.kUpdated],
+      [IceCandidatePairConfigType.kDestroyed, LoggedIceEventType.kDestroyed],
+      [IceCandidatePairConfigType.kSelected, LoggedIceEventType.kSelected],
+    ]);
+    const logEvents: LoggedIceEvent[] = [];
+    // std::map::operator[] default-inserts value 0 (kAdded) for unknown keys.
+    const handleCheck = (check: LoggedIceCandidatePairEvent) => {
+      logEvents.push(
+        new LoggedIceEvent(check.candidatePairId, Timestamp.millis(check.logTimeMs()), checkMap.get(check.type) ?? LoggedIceEventType.kAdded),
+      );
+    };
+    const handleConfig = (conf: LoggedIceCandidatePairConfig) => {
+      logEvents.push(
+        new LoggedIceEvent(conf.candidatePairId, Timestamp.millis(conf.logTimeMs()), configMap.get(conf.type) ?? LoggedIceEventType.kAdded),
+      );
+    };
+    const process = new RtcEventProcessor();
+    process.addEvents(this.iceCandidatePairEventsValue, handleCheck, TypeOrder.IceCandidateEvent);
+    process.addEvents(this.iceCandidatePairConfigsValue, handleConfig, TypeOrder.IceCondidateConfig);
+    process.processEventsInOrder();
+    return logEvents;
   }
 
   // RTP
