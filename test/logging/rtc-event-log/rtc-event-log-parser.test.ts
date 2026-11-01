@@ -211,11 +211,11 @@ describe("ParsedRtcEventLog errors", () => {
     expect(parsed.parseString(bytes((5 << 3) | 0, 1)).ok()).toBe(false);
   });
 
-  test("LegacyFormatNotSupportedYet", () => {
+  test("LegacyEventWithoutType", () => {
+    // Field 1 (legacy EventStream) holding one empty Event.
     const parsed = new ParsedRtcEventLog();
     const status = parsed.parseString(bytes((1 << 3) | 2, 0));
-    expect(status.ok()).toBe(false);
-    expect(status.message()).toMatch(/legacy/);
+    expect(status.message()).toBe("event.has_type()");
   });
 
   test("MissingRequiredRtpField", () => {

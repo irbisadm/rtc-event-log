@@ -4,7 +4,14 @@
 // (protobuf) format, including the parsed RTCP blocks; the legacy and v3
 // formats are rejected.
 
-import {fromBinary} from "@bufbuild/protobuf";
+import {create, type DescMessage, fromBinary, type MessageShape} from "@bufbuild/protobuf";
+
+import * as rtclog from "../../gen/rtc_event_log_pb.js";
+import {RtpHeaderExtensionMap} from "../../modules/rtp-rtcp/include/rtp-header-extension-map.js";
+import {RtpPacketReceived} from "../../modules/rtp-rtcp/source/rtp-packet-received.js";
+import {RtcpMode} from "../../api/rtp-headers.js";
+import {StreamConfig, StreamConfigCodec} from "./rtc-stream-config.js";
+import {RtcEventLogParseStatusOr} from "./events/rtc-event-log-parse-status.js";
 
 import {IceCandidateType} from "../../api/candidate.js";
 import {DtlsTransportState} from "../../api/dtls-transport-interface.js";
@@ -584,6 +591,148 @@ export function getRuntimeRtpHeaderExtensionConfig(protoHeaderExtensions: RtpHea
   return rtpExtensions;
 }
 
+// Conversion functions for legacy wire format.
+function getRuntimeRtcpModeLegacy(rtcpMode: rtclog.VideoReceiveConfig_RtcpMode): RtcpMode {
+  switch (rtcpMode) {
+    case rtclog.VideoReceiveConfig_RtcpMode.RTCP_COMPOUND:
+      return RtcpMode.kCompound;
+    case rtclog.VideoReceiveConfig_RtcpMode.RTCP_REDUCEDSIZE:
+      return RtcpMode.kReducedSize;
+    default:
+      return RtcpMode.kOff;
+  }
+}
+
+function getRuntimeDetectorStateLegacy(detectorState: rtclog.DelayBasedBweUpdate_DetectorState): BandwidthUsage {
+  switch (detectorState) {
+    case rtclog.DelayBasedBweUpdate_DetectorState.BWE_NORMAL:
+      return BandwidthUsage.kBwNormal;
+    case rtclog.DelayBasedBweUpdate_DetectorState.BWE_UNDERUSING:
+      return BandwidthUsage.kBwUnderusing;
+    case rtclog.DelayBasedBweUpdate_DetectorState.BWE_OVERUSING:
+      return BandwidthUsage.kBwOverusing;
+    default:
+      return BandwidthUsage.kBwNormal;
+  }
+}
+
+function getRuntimeIceCandidatePairConfigTypeLegacy(
+  type: rtclog.IceCandidatePairConfig_IceCandidatePairConfigType,
+): IceCandidatePairConfigType {
+  switch (type) {
+    case rtclog.IceCandidatePairConfig_IceCandidatePairConfigType.ADDED:
+      return IceCandidatePairConfigType.kAdded;
+    case rtclog.IceCandidatePairConfig_IceCandidatePairConfigType.UPDATED:
+      return IceCandidatePairConfigType.kUpdated;
+    case rtclog.IceCandidatePairConfig_IceCandidatePairConfigType.DESTROYED:
+      return IceCandidatePairConfigType.kDestroyed;
+    case rtclog.IceCandidatePairConfig_IceCandidatePairConfigType.SELECTED:
+      return IceCandidatePairConfigType.kSelected;
+    default:
+      return IceCandidatePairConfigType.kAdded;
+  }
+}
+
+// Undefined when the log type has no runtime equivalent.
+function getRuntimeIceCandidateTypeLegacy(logType: rtclog.IceCandidatePairConfig_IceCandidateType): IceCandidateType | undefined {
+  switch (logType) {
+    case rtclog.IceCandidatePairConfig_IceCandidateType.LOCAL:
+      return IceCandidateType.kHost;
+    case rtclog.IceCandidatePairConfig_IceCandidateType.STUN:
+      return IceCandidateType.kSrflx;
+    case rtclog.IceCandidatePairConfig_IceCandidateType.PRFLX:
+      return IceCandidateType.kPrflx;
+    case rtclog.IceCandidatePairConfig_IceCandidateType.RELAY:
+      return IceCandidateType.kRelay;
+    default:
+      return undefined;
+  }
+}
+
+function getRuntimeIceCandidatePairProtocolLegacy(protocol: rtclog.IceCandidatePairConfig_Protocol): IceCandidatePairProtocol {
+  switch (protocol) {
+    case rtclog.IceCandidatePairConfig_Protocol.UDP:
+      return IceCandidatePairProtocol.kUdp;
+    case rtclog.IceCandidatePairConfig_Protocol.TCP:
+      return IceCandidatePairProtocol.kTcp;
+    case rtclog.IceCandidatePairConfig_Protocol.SSLTCP:
+      return IceCandidatePairProtocol.kSsltcp;
+    case rtclog.IceCandidatePairConfig_Protocol.TLS:
+      return IceCandidatePairProtocol.kTls;
+    default:
+      return IceCandidatePairProtocol.kUnknown;
+  }
+}
+
+function getRuntimeIceCandidatePairAddressFamilyLegacy(
+  addressFamily: rtclog.IceCandidatePairConfig_AddressFamily,
+): IceCandidatePairAddressFamily {
+  switch (addressFamily) {
+    case rtclog.IceCandidatePairConfig_AddressFamily.IPV4:
+      return IceCandidatePairAddressFamily.kIpv4;
+    case rtclog.IceCandidatePairConfig_AddressFamily.IPV6:
+      return IceCandidatePairAddressFamily.kIpv6;
+    default:
+      return IceCandidatePairAddressFamily.kUnknown;
+  }
+}
+
+function getRuntimeIceCandidateNetworkTypeLegacy(networkType: rtclog.IceCandidatePairConfig_NetworkType): IceCandidateNetworkType {
+  switch (networkType) {
+    case rtclog.IceCandidatePairConfig_NetworkType.ETHERNET:
+      return IceCandidateNetworkType.kEthernet;
+    case rtclog.IceCandidatePairConfig_NetworkType.LOOPBACK:
+      return IceCandidateNetworkType.kLoopback;
+    case rtclog.IceCandidatePairConfig_NetworkType.WIFI:
+      return IceCandidateNetworkType.kWifi;
+    case rtclog.IceCandidatePairConfig_NetworkType.VPN:
+      return IceCandidateNetworkType.kVpn;
+    case rtclog.IceCandidatePairConfig_NetworkType.CELLULAR:
+      return IceCandidateNetworkType.kCellular;
+    default:
+      return IceCandidateNetworkType.kUnknown;
+  }
+}
+
+function getRuntimeIceCandidatePairEventTypeLegacy(
+  type: rtclog.IceCandidatePairEvent_IceCandidatePairEventType,
+): IceCandidatePairEventType {
+  switch (type) {
+    case rtclog.IceCandidatePairEvent_IceCandidatePairEventType.CHECK_SENT:
+      return IceCandidatePairEventType.kCheckSent;
+    case rtclog.IceCandidatePairEvent_IceCandidatePairEventType.CHECK_RECEIVED:
+      return IceCandidatePairEventType.kCheckReceived;
+    case rtclog.IceCandidatePairEvent_IceCandidatePairEventType.CHECK_RESPONSE_SENT:
+      return IceCandidatePairEventType.kCheckResponseSent;
+    case rtclog.IceCandidatePairEvent_IceCandidatePairEventType.CHECK_RESPONSE_RECEIVED:
+      return IceCandidatePairEventType.kCheckResponseReceived;
+    default:
+      return IceCandidatePairEventType.kCheckSent;
+  }
+}
+
+function getHeaderExtensions(protoHeaderExtensions: readonly rtclog.RtpHeaderExtension[]): RtpExtension[] | ParseStatus {
+  const headerExtensions: RtpExtension[] = [];
+  for (const p of protoHeaderExtensions) {
+    if (!has(rtclog.RtpHeaderExtensionSchema, p, "name")) return ParseStatus.error("p.has_name()");
+    if (!has(rtclog.RtpHeaderExtensionSchema, p, "id")) return ParseStatus.error("p.has_id()");
+    headerExtensions.push(new RtpExtension(p.name, p.id));
+  }
+  return headerExtensions;
+}
+
+// The oneof member `event.<name>()` of a legacy Event: the set message, or an
+// empty one (whose fields all read as unset) when another member is set.
+function legacySubtype<Desc extends DescMessage>(
+  event: rtclog.Event,
+  name: string,
+  schema: Desc,
+): MessageShape<Desc> {
+  return event.subtype.case === name ? (event.subtype.value as unknown as MessageShape<Desc>) : create(schema);
+}
+
+const hasSubtype = (event: rtclog.Event, name: string) => event.subtype.case === name;
+
 function pushToMap<T>(map: Map<number, T[]>, key: number, value: T): void {
   let list = map.get(key);
   if (list === undefined) {
@@ -1119,6 +1268,11 @@ export class ParsedRtcEventLog {
   private incomingRtcpPacketsValue: LoggedRtcpPacketIncoming[] = [];
   private outgoingRtcpPacketsValue: LoggedRtcpPacketOutgoing[] = [];
   private incomingRtcp = new RtcpBlockLists();
+  // Legacy format only.
+  private lastIncomingRtcpPacket: Uint8Array = new Uint8Array(0);
+  private incomingRtpExtensionsMaps = new Map<number, RtpHeaderExtensionMap>();
+  private outgoingRtpExtensionsMaps = new Map<number, RtpHeaderExtensionMap>();
+  private defaultExtensionMap = RtpHeaderExtensionMap.defaultHeaderExtensionMap();
   private outgoingRtcp = new RtcpBlockLists();
 
   private startLogEventsValue: LoggedStartEvent[] = [];
@@ -1218,6 +1372,11 @@ export class ParsedRtcEventLog {
     this.firstTimestampValue = Timestamp.plusInfinity();
     this.lastTimestampValue = Timestamp.minusInfinity();
     this.firstLogSegmentValue = new LogSegment(0, kInt64Max);
+
+    this.defaultExtensionMap = RtpHeaderExtensionMap.defaultHeaderExtensionMap();
+    this.lastIncomingRtcpPacket = new Uint8Array(0);
+    this.incomingRtpExtensionsMaps = new Map();
+    this.outgoingRtpExtensionsMaps = new Map();
   }
 
   // Reads an RtcEventLog from a byte buffer and returns success if successful.
@@ -1953,8 +2112,17 @@ export class ParsedRtcEventLog {
       const event = eventStart.subarray(0, totalEventSize);
 
       if (tag === kExpectedV1Tag) {
-        // TODO(stage 7): legacy format.
-        return ParseStatus.error("The legacy event log format is not supported yet");
+        // Parse the protobuf event from the buffer.
+        let eventStream: rtclog.EventStream;
+        try {
+          eventStream = fromBinary(rtclog.EventStreamSchema, event);
+        } catch {
+          if (this.allowIncompleteLogs) return this.warnIncomplete();
+          return ParseStatus.error("false");
+        }
+        if (eventStream.stream.length !== 1) return ParseStatus.error("event_stream.stream_size()==1");
+        const status = this.storeParsedLegacyEvent(eventStream.stream[0]);
+        if (!status.ok()) return status;
       } else {
         // Parse the protobuf event from the buffer.
         let eventStream: EventStream;
@@ -2845,8 +3013,540 @@ export class ParsedRtcEventLog {
     return ParseStatus.success();
   }
 
-  // Not used before the legacy format (header extension maps) is ported.
-  protected unconfiguredHeaderExtensions(): UnconfiguredHeaderExtensions {
-    return this.parseUnconfiguredHeaderExtensions;
+  // Legacy format (rtc_event_log.proto).
+
+  private storeParsedLegacyEvent(event: rtclog.Event): ParseStatus {
+    const ET = rtclog.Event_EventType;
+    if (!has(rtclog.EventSchema, event, "type")) return ParseStatus.error("event.has_type()");
+    const hasTimestamp = has(rtclog.EventSchema, event, "timestampUs");
+    const timestampUs = () => Timestamp.micros(event.timestampUs);
+    switch (event.type) {
+      case ET.VIDEO_RECEIVER_CONFIG_EVENT: {
+        const config = this.getVideoReceiveConfig(event);
+        if (!config.ok()) return config.status();
+        if (!hasTimestamp) return ParseStatus.error("event.has_timestamp_us()");
+        this.videoRecvConfigsValue.push(new LoggedVideoRecvConfig(timestampUs(), config.value()));
+        this.incomingRtpExtensionsMaps.set(config.value().remoteSsrc, new RtpHeaderExtensionMap(config.value().rtpExtensions));
+        this.incomingRtpExtensionsMaps.set(config.value().rtxSsrc, new RtpHeaderExtensionMap(config.value().rtpExtensions));
+        break;
+      }
+      case ET.VIDEO_SENDER_CONFIG_EVENT: {
+        const config = this.getVideoSendConfig(event);
+        if (!config.ok()) return config.status();
+        if (!hasTimestamp) return ParseStatus.error("event.has_timestamp_us()");
+        this.videoSendConfigsValue.push(new LoggedVideoSendConfig(timestampUs(), config.value()));
+        this.outgoingRtpExtensionsMaps.set(config.value().localSsrc, new RtpHeaderExtensionMap(config.value().rtpExtensions));
+        this.outgoingRtpExtensionsMaps.set(config.value().rtxSsrc, new RtpHeaderExtensionMap(config.value().rtpExtensions));
+        break;
+      }
+      case ET.AUDIO_RECEIVER_CONFIG_EVENT: {
+        const config = this.getAudioReceiveConfig(event);
+        if (!config.ok()) return config.status();
+        if (!hasTimestamp) return ParseStatus.error("event.has_timestamp_us()");
+        this.audioRecvConfigsValue.push(new LoggedAudioRecvConfig(timestampUs(), config.value()));
+        this.incomingRtpExtensionsMaps.set(config.value().remoteSsrc, new RtpHeaderExtensionMap(config.value().rtpExtensions));
+        break;
+      }
+      case ET.AUDIO_SENDER_CONFIG_EVENT: {
+        const config = this.getAudioSendConfig(event);
+        if (!config.ok()) return config.status();
+        if (!hasTimestamp) return ParseStatus.error("event.has_timestamp_us()");
+        this.audioSendConfigsValue.push(new LoggedAudioSendConfig(timestampUs(), config.value()));
+        this.outgoingRtpExtensionsMaps.set(config.value().localSsrc, new RtpHeaderExtensionMap(config.value().rtpExtensions));
+        break;
+      }
+      case ET.RTP_EVENT: {
+        if (!hasSubtype(event, "rtpPacket")) return ParseStatus.error("event.has_rtp_packet()");
+        const rtpPacket = event.subtype.value as rtclog.RtpPacket;
+        const S = rtclog.RtpPacketSchema;
+        if (!has(S, rtpPacket, "header")) return ParseStatus.error("rtp_packet.has_header()");
+        if (!has(S, rtpPacket, "incoming")) return ParseStatus.error("rtp_packet.has_incoming()");
+        if (!has(S, rtpPacket, "packetLength")) return ParseStatus.error("rtp_packet.has_packet_length()");
+        const totalLength = rtpPacket.packetLength;
+
+        // Use RtpPacketReceived instead of more generic RtpPacket because former
+        // has a buildin convertion to RTPHeader.
+        const rtpHeader = new RtpPacketReceived();
+        if (!rtpHeader.parse(rtpPacket.header)) return ParseStatus.error("rtp_header.Parse(CopyOnWriteBuffer(rtp_packet.header()))");
+        const extensionMap = this.getRtpHeaderExtensionMap(rtpPacket.incoming, rtpHeader.ssrc());
+        if (extensionMap !== null) {
+          rtpHeader.identifyExtensions(extensionMap);
+        }
+
+        const parsedHeader = rtpHeader.getHeader();
+        // Since we give the parser only a header, there is no way for it to know
+        // the padding length. The best solution would be to log the padding
+        // length in RTC event log. In absence of it, we assume the RTP packet to
+        // contain only padding, if the padding bit is set.
+        // TODO(webrtc:9730): Use a generic way to obtain padding length.
+        if (rtpHeader.hasPadding()) {
+          // size_t arithmetic.
+          parsedHeader.paddingLength = Number(BigInt.asUintN(64, BigInt(totalLength - rtpHeader.size())));
+        }
+
+        if (!hasTimestamp) return ParseStatus.error("event.has_timestamp_us()");
+        if (rtpPacket.incoming) {
+          pushToMap(
+            this.incomingRtpPacketsMap,
+            parsedHeader.ssrc,
+            new LoggedRtpPacketIncoming(timestampUs(), parsedHeader, rtpHeader.size(), totalLength),
+          );
+        } else {
+          pushToMap(
+            this.outgoingRtpPacketsMap,
+            parsedHeader.ssrc,
+            new LoggedRtpPacketOutgoing(timestampUs(), parsedHeader, rtpHeader.size(), totalLength),
+          );
+        }
+        break;
+      }
+      case ET.RTCP_EVENT: {
+        const packet = this.getRtcpPacket(event);
+        if (packet instanceof RtcEventLogParseStatus) return packet;
+        if (!hasTimestamp) return ParseStatus.error("event.has_timestamp_us()");
+        if (packet.incoming) {
+          // Currently incoming RTCP packets are logged twice, both for audio and
+          // video. Only act on one of them. Compare against the previous parsed
+          // incoming RTCP packet.
+          if (identicalRtcpContents(packet.data, this.lastIncomingRtcpPacket)) break;
+          this.incomingRtcpPacketsValue.push(new LoggedRtcpPacketIncoming(timestampUs(), packet.data));
+          this.lastIncomingRtcpPacket = packet.data;
+        } else {
+          this.outgoingRtcpPacketsValue.push(new LoggedRtcpPacketOutgoing(timestampUs(), packet.data));
+        }
+        break;
+      }
+      case ET.LOG_START: {
+        if (!hasTimestamp) return ParseStatus.error("event.has_timestamp_us()");
+        this.startLogEventsValue.push(new LoggedStartEvent(timestampUs()));
+        break;
+      }
+      case ET.LOG_END: {
+        if (!hasTimestamp) return ParseStatus.error("event.has_timestamp_us()");
+        this.stopLogEventsValue.push(new LoggedStopEvent(timestampUs()));
+        break;
+      }
+      case ET.AUDIO_PLAYOUT_EVENT: {
+        const value = this.getAudioPlayout(event);
+        if (!value.ok()) return value.status();
+        pushToMap(this.audioPlayoutEventsValue, value.value().ssrc, value.value());
+        break;
+      }
+      case ET.LOSS_BASED_BWE_UPDATE: {
+        const value = this.getLossBasedBweUpdate(event);
+        if (!value.ok()) return value.status();
+        this.bweLossUpdatesValue.push(value.value());
+        break;
+      }
+      case ET.DELAY_BASED_BWE_UPDATE: {
+        const value = this.getDelayBasedBweUpdate(event);
+        if (!value.ok()) return value.status();
+        this.bweDelayUpdatesValue.push(value.value());
+        break;
+      }
+      case ET.AUDIO_NETWORK_ADAPTATION_EVENT: {
+        const value = this.getAudioNetworkAdaptation(event);
+        if (!value.ok()) return value.status();
+        this.audioNetworkAdaptationEventsValue.push(value.value());
+        break;
+      }
+      case ET.BWE_PROBE_CLUSTER_CREATED_EVENT: {
+        const value = this.getBweProbeClusterCreated(event);
+        if (!value.ok()) return value.status();
+        this.bweProbeClusterCreatedEventsValue.push(value.value());
+        break;
+      }
+      case ET.BWE_PROBE_RESULT_EVENT: {
+        // Probe successes and failures are currently stored in the same proto
+        // message, we are moving towards separate messages. Probe results
+        // therefore need special treatment in the parser.
+        if (!hasSubtype(event, "probeResult")) return ParseStatus.error("event.has_probe_result()");
+        const probeResult = event.subtype.value as rtclog.BweProbeResult;
+        if (!has(rtclog.BweProbeResultSchema, probeResult, "result")) return ParseStatus.error("event.probe_result().has_result()");
+        if (probeResult.result === rtclog.BweProbeResult_ResultType.SUCCESS) {
+          const value = this.getBweProbeSuccess(event);
+          if (!value.ok()) return value.status();
+          this.bweProbeSuccessEventsValue.push(value.value());
+        } else {
+          const value = this.getBweProbeFailure(event);
+          if (!value.ok()) return value.status();
+          this.bweProbeFailureEventsValue.push(value.value());
+        }
+        break;
+      }
+      case ET.ALR_STATE_EVENT: {
+        const value = this.getAlrState(event);
+        if (!value.ok()) return value.status();
+        this.alrStateEventsValue.push(value.value());
+        break;
+      }
+      case ET.ICE_CANDIDATE_PAIR_CONFIG: {
+        const value = this.getIceCandidatePairConfig(event);
+        if (!value.ok()) return value.status();
+        this.iceCandidatePairConfigsValue.push(value.value());
+        break;
+      }
+      case ET.ICE_CANDIDATE_PAIR_EVENT: {
+        const value = this.getIceCandidatePairEvent(event);
+        if (!value.ok()) return value.status();
+        this.iceCandidatePairEventsValue.push(value.value());
+        break;
+      }
+      case ET.REMOTE_ESTIMATE: {
+        const value = this.getRemoteEstimateEvent(event);
+        if (!value.ok()) return value.status();
+        this.remoteEstimateEventsValue.push(value.value());
+        break;
+      }
+      case ET.UNKNOWN_EVENT:
+      default:
+        break;
+    }
+    return ParseStatus.success();
+  }
+
+  // Returns a map of the extensions logged for the SSRC (or the default map
+  // when configured to attempt it), or null.
+  private getRtpHeaderExtensionMap(incoming: boolean, ssrc: number): RtpHeaderExtensionMap | null {
+    const extensionsMaps = incoming ? this.incomingRtpExtensionsMaps : this.outgoingRtpExtensionsMaps;
+    const map = extensionsMaps.get(ssrc);
+    if (map !== undefined) {
+      return map;
+    }
+    if (this.parseUnconfiguredHeaderExtensions === UnconfiguredHeaderExtensions.kAttemptWebrtcDefaultConfig) {
+      // Using default header extension map for the SSRC.
+      extensionsMaps.set(ssrc, this.defaultExtensionMap);
+      return this.defaultExtensionMap;
+    }
+    // Not parsing header extensions: no header extension map found.
+    return null;
+  }
+
+  private getRtcpPacket(event: rtclog.Event): {incoming: boolean; data: Uint8Array} | ParseStatus {
+    if (!has(rtclog.EventSchema, event, "type")) return ParseStatus.error("event.has_type()");
+    if (event.type !== rtclog.Event_EventType.RTCP_EVENT) return ParseStatus.error("event.type()==rtclog::Event::RTCP_EVENT");
+    if (!hasSubtype(event, "rtcpPacket")) return ParseStatus.error("event.has_rtcp_packet()");
+    const rtcpPacket = event.subtype.value as rtclog.RtcpPacket;
+    if (!has(rtclog.RtcpPacketSchema, rtcpPacket, "incoming")) return ParseStatus.error("rtcp_packet.has_incoming()");
+    if (!has(rtclog.RtcpPacketSchema, rtcpPacket, "packetData")) return ParseStatus.error("rtcp_packet.has_packet_data()");
+    return {incoming: rtcpPacket.incoming, data: rtcpPacket.packetData.slice()};
+  }
+
+  private checkLegacyEvent(event: rtclog.Event, type: rtclog.Event_EventType, name: string): ParseStatus | null {
+    if (!has(rtclog.EventSchema, event, "type")) return ParseStatus.error("event.has_type()");
+    if (event.type !== type) return ParseStatus.error(`event.type()==rtclog::Event::${rtclog.Event_EventType[type]}`);
+    if (name !== "" && !hasSubtype(event, name)) return ParseStatus.error(`event.has_${name}()`);
+    return null;
+  }
+
+  private getVideoReceiveConfig(event: rtclog.Event): RtcEventLogParseStatusOr<StreamConfig> {
+    const err = this.checkLegacyEvent(event, rtclog.Event_EventType.VIDEO_RECEIVER_CONFIG_EVENT, "videoReceiverConfig");
+    if (err) return RtcEventLogParseStatusOr.ofStatus(err);
+    const config = new StreamConfig();
+    const receiverConfig = event.subtype.value as rtclog.VideoReceiveConfig;
+    const S = rtclog.VideoReceiveConfigSchema;
+    const fail = (m: string) => RtcEventLogParseStatusOr.error<StreamConfig>(m);
+    if (!has(S, receiverConfig, "remoteSsrc")) return fail("receiver_config.has_remote_ssrc()");
+    config.remoteSsrc = receiverConfig.remoteSsrc;
+    if (!has(S, receiverConfig, "localSsrc")) return fail("receiver_config.has_local_ssrc()");
+    config.localSsrc = receiverConfig.localSsrc;
+    config.rtxSsrc = 0;
+    if (!has(S, receiverConfig, "rtcpMode")) return fail("receiver_config.has_rtcp_mode()");
+    config.rtcpMode = getRuntimeRtcpModeLegacy(receiverConfig.rtcpMode);
+    if (!has(S, receiverConfig, "remb")) return fail("receiver_config.has_remb()");
+    config.remb = receiverConfig.remb;
+
+    // Get RTX map. std::map::insert keeps the first entry per payload type.
+    const rtxMap = new Map<number, rtclog.RtxConfig>();
+    for (const map of receiverConfig.rtxMap) {
+      if (!has(rtclog.RtxMapSchema, map, "payloadType")) return fail("map.has_payload_type()");
+      if (map.config === undefined) return fail("map.has_config()");
+      if (!has(rtclog.RtxConfigSchema, map.config, "rtxSsrc")) return fail("map.config().has_rtx_ssrc()");
+      if (!has(rtclog.RtxConfigSchema, map.config, "rtxPayloadType")) return fail("map.config().has_rtx_payload_type()");
+      if (!rtxMap.has(map.payloadType)) rtxMap.set(map.payloadType, map.config);
+    }
+
+    // Get header extensions.
+    const extensions = getHeaderExtensions(receiverConfig.headerExtensions);
+    if (extensions instanceof RtcEventLogParseStatus) return RtcEventLogParseStatusOr.ofStatus(extensions);
+    config.rtpExtensions = extensions;
+
+    // Get decoders.
+    config.codecs = [];
+    for (const decoder of receiverConfig.decoders) {
+      if (!has(rtclog.DecoderConfigSchema, decoder, "name")) return fail("receiver_config.decoders(i).has_name()");
+      if (!has(rtclog.DecoderConfigSchema, decoder, "payloadType")) return fail("receiver_config.decoders(i).has_payload_type()");
+      let rtxPayloadType = 0;
+      const rtx = rtxMap.get(decoder.payloadType);
+      if (rtx !== undefined) {
+        rtxPayloadType = rtx.rtxPayloadType;
+        if (config.rtxSsrc !== 0 && config.rtxSsrc !== rtx.rtxSsrc) {
+          // Different SSRCs for different received RTX payload types: only the
+          // first rtx_ssrc is used.
+        } else {
+          config.rtxSsrc = rtx.rtxSsrc;
+        }
+      }
+      config.codecs.push(new StreamConfigCodec(decoder.name, decoder.payloadType, rtxPayloadType));
+    }
+    return RtcEventLogParseStatusOr.ofValue(config);
+  }
+
+  private getVideoSendConfig(event: rtclog.Event): RtcEventLogParseStatusOr<StreamConfig> {
+    const err = this.checkLegacyEvent(event, rtclog.Event_EventType.VIDEO_SENDER_CONFIG_EVENT, "videoSenderConfig");
+    if (err) return RtcEventLogParseStatusOr.ofStatus(err);
+    const config = new StreamConfig();
+    const senderConfig = event.subtype.value as rtclog.VideoSendConfig;
+    const fail = (m: string) => RtcEventLogParseStatusOr.error<StreamConfig>(m);
+
+    // Get SSRCs.
+    // VideoSendStreamConfig no longer stores multiple SSRCs. If you are
+    // analyzing a very old log, try building the parser from the same
+    // WebRTC version.
+    if (senderConfig.ssrcs.length !== 1) return fail("sender_config.ssrcs_size()==1");
+    config.localSsrc = senderConfig.ssrcs[0];
+    if (!(senderConfig.rtxSsrcs.length <= 1)) return fail("sender_config.rtx_ssrcs_size()<=1");
+    if (senderConfig.rtxSsrcs.length === 1) {
+      config.rtxSsrc = senderConfig.rtxSsrcs[0];
+    }
+
+    // Get header extensions.
+    const extensions = getHeaderExtensions(senderConfig.headerExtensions);
+    if (extensions instanceof RtcEventLogParseStatus) return RtcEventLogParseStatusOr.ofStatus(extensions);
+    config.rtpExtensions = extensions;
+
+    // Get the codec.
+    if (senderConfig.encoder === undefined) return fail("sender_config.has_encoder()");
+    if (!has(rtclog.EncoderConfigSchema, senderConfig.encoder, "name")) return fail("sender_config.encoder().has_name()");
+    if (!has(rtclog.EncoderConfigSchema, senderConfig.encoder, "payloadType")) return fail("sender_config.encoder().has_payload_type()");
+    config.codecs.push(
+      new StreamConfigCodec(
+        senderConfig.encoder.name,
+        senderConfig.encoder.payloadType,
+        has(rtclog.VideoSendConfigSchema, senderConfig, "rtxPayloadType") ? senderConfig.rtxPayloadType : 0,
+      ),
+    );
+    return RtcEventLogParseStatusOr.ofValue(config);
+  }
+
+  private getAudioReceiveConfig(event: rtclog.Event): RtcEventLogParseStatusOr<StreamConfig> {
+    const err = this.checkLegacyEvent(event, rtclog.Event_EventType.AUDIO_RECEIVER_CONFIG_EVENT, "audioReceiverConfig");
+    if (err) return RtcEventLogParseStatusOr.ofStatus(err);
+    const config = new StreamConfig();
+    const receiverConfig = event.subtype.value as rtclog.AudioReceiveConfig;
+    const S = rtclog.AudioReceiveConfigSchema;
+    if (!has(S, receiverConfig, "remoteSsrc")) return RtcEventLogParseStatusOr.error("receiver_config.has_remote_ssrc()");
+    config.remoteSsrc = receiverConfig.remoteSsrc;
+    if (!has(S, receiverConfig, "localSsrc")) return RtcEventLogParseStatusOr.error("receiver_config.has_local_ssrc()");
+    config.localSsrc = receiverConfig.localSsrc;
+    const extensions = getHeaderExtensions(receiverConfig.headerExtensions);
+    if (extensions instanceof RtcEventLogParseStatus) return RtcEventLogParseStatusOr.ofStatus(extensions);
+    config.rtpExtensions = extensions;
+    return RtcEventLogParseStatusOr.ofValue(config);
+  }
+
+  private getAudioSendConfig(event: rtclog.Event): RtcEventLogParseStatusOr<StreamConfig> {
+    const err = this.checkLegacyEvent(event, rtclog.Event_EventType.AUDIO_SENDER_CONFIG_EVENT, "audioSenderConfig");
+    if (err) return RtcEventLogParseStatusOr.ofStatus(err);
+    const config = new StreamConfig();
+    const senderConfig = event.subtype.value as rtclog.AudioSendConfig;
+    if (!has(rtclog.AudioSendConfigSchema, senderConfig, "ssrc")) return RtcEventLogParseStatusOr.error("sender_config.has_ssrc()");
+    config.localSsrc = senderConfig.ssrc;
+    const extensions = getHeaderExtensions(senderConfig.headerExtensions);
+    if (extensions instanceof RtcEventLogParseStatus) return RtcEventLogParseStatusOr.ofStatus(extensions);
+    config.rtpExtensions = extensions;
+    return RtcEventLogParseStatusOr.ofValue(config);
+  }
+
+  private legacyTimestamp(event: rtclog.Event): Timestamp | undefined {
+    return has(rtclog.EventSchema, event, "timestampUs") ? Timestamp.micros(event.timestampUs) : undefined;
+  }
+
+  private getAudioPlayout(event: rtclog.Event): RtcEventLogParseStatusOr<LoggedAudioPlayoutEvent> {
+    const err = this.checkLegacyEvent(event, rtclog.Event_EventType.AUDIO_PLAYOUT_EVENT, "audioPlayoutEvent");
+    if (err) return RtcEventLogParseStatusOr.ofStatus(err);
+    const playoutEvent = event.subtype.value as rtclog.AudioPlayoutEvent;
+    const timestamp = this.legacyTimestamp(event);
+    if (timestamp === undefined) return RtcEventLogParseStatusOr.error("event.has_timestamp_us()");
+    if (!has(rtclog.AudioPlayoutEventSchema, playoutEvent, "localSsrc")) return RtcEventLogParseStatusOr.error("playout_event.has_local_ssrc()");
+    return RtcEventLogParseStatusOr.ofValue(new LoggedAudioPlayoutEvent(timestamp, playoutEvent.localSsrc));
+  }
+
+  private getLossBasedBweUpdate(event: rtclog.Event): RtcEventLogParseStatusOr<LoggedBweLossBasedUpdate> {
+    const err = this.checkLegacyEvent(event, rtclog.Event_EventType.LOSS_BASED_BWE_UPDATE, "lossBasedBweUpdate");
+    if (err) return RtcEventLogParseStatusOr.ofStatus(err);
+    const lossEvent = event.subtype.value as rtclog.LossBasedBweUpdate;
+    const S = rtclog.LossBasedBweUpdateSchema;
+    // RTC_CHECK upstream (a crash rather than a parse error).
+    const timestamp = this.legacyTimestamp(event);
+    if (timestamp === undefined) return RtcEventLogParseStatusOr.error("event.has_timestamp_us()");
+    if (!has(S, lossEvent, "bitrateBps")) return RtcEventLogParseStatusOr.error("loss_event.has_bitrate_bps()");
+    if (!has(S, lossEvent, "fractionLoss")) return RtcEventLogParseStatusOr.error("loss_event.has_fraction_loss()");
+    if (!has(S, lossEvent, "totalPackets")) return RtcEventLogParseStatusOr.error("loss_event.has_total_packets()");
+    return RtcEventLogParseStatusOr.ofValue(
+      new LoggedBweLossBasedUpdate(timestamp, lossEvent.bitrateBps | 0, lossEvent.fractionLoss & 0xff, lossEvent.totalPackets | 0),
+    );
+  }
+
+  private getDelayBasedBweUpdate(event: rtclog.Event): RtcEventLogParseStatusOr<LoggedBweDelayBasedUpdate> {
+    const err = this.checkLegacyEvent(event, rtclog.Event_EventType.DELAY_BASED_BWE_UPDATE, "delayBasedBweUpdate");
+    if (err) return RtcEventLogParseStatusOr.ofStatus(err);
+    const delayEvent = event.subtype.value as rtclog.DelayBasedBweUpdate;
+    const S = rtclog.DelayBasedBweUpdateSchema;
+    const timestamp = this.legacyTimestamp(event);
+    if (timestamp === undefined) return RtcEventLogParseStatusOr.error("event.has_timestamp_us()");
+    if (!has(S, delayEvent, "bitrateBps")) return RtcEventLogParseStatusOr.error("delay_event.has_bitrate_bps()");
+    if (!has(S, delayEvent, "detectorState")) return RtcEventLogParseStatusOr.error("delay_event.has_detector_state()");
+    return RtcEventLogParseStatusOr.ofValue(
+      new LoggedBweDelayBasedUpdate(timestamp, delayEvent.bitrateBps | 0, getRuntimeDetectorStateLegacy(delayEvent.detectorState)),
+    );
+  }
+
+  private getAudioNetworkAdaptation(event: rtclog.Event): RtcEventLogParseStatusOr<LoggedAudioNetworkAdaptationEvent> {
+    const err = this.checkLegacyEvent(event, rtclog.Event_EventType.AUDIO_NETWORK_ADAPTATION_EVENT, "audioNetworkAdaptation");
+    if (err) return RtcEventLogParseStatusOr.ofStatus(err);
+    const anaEvent = event.subtype.value as rtclog.AudioNetworkAdaptation;
+    const S = rtclog.AudioNetworkAdaptationSchema;
+    const timestamp = this.legacyTimestamp(event);
+    if (timestamp === undefined) return RtcEventLogParseStatusOr.error("event.has_timestamp_us()");
+    const res = new LoggedAudioNetworkAdaptationEvent(timestamp);
+    if (has(S, anaEvent, "bitrateBps")) res.config.bitrateBps = anaEvent.bitrateBps;
+    if (has(S, anaEvent, "enableFec")) res.config.enableFec = anaEvent.enableFec;
+    if (has(S, anaEvent, "enableDtx")) res.config.enableDtx = anaEvent.enableDtx;
+    if (has(S, anaEvent, "frameLengthMs")) res.config.frameLengthMs = anaEvent.frameLengthMs;
+    if (has(S, anaEvent, "numChannels")) res.config.numChannels = anaEvent.numChannels;
+    if (has(S, anaEvent, "uplinkPacketLossFraction")) res.config.uplinkPacketLossFraction = Math.fround(anaEvent.uplinkPacketLossFraction);
+    return RtcEventLogParseStatusOr.ofValue(res);
+  }
+
+  private getBweProbeClusterCreated(event: rtclog.Event): RtcEventLogParseStatusOr<LoggedBweProbeClusterCreatedEvent> {
+    const err = this.checkLegacyEvent(event, rtclog.Event_EventType.BWE_PROBE_CLUSTER_CREATED_EVENT, "probeCluster");
+    if (err) return RtcEventLogParseStatusOr.ofStatus(err);
+    const pccEvent = event.subtype.value as rtclog.BweProbeCluster;
+    const S = rtclog.BweProbeClusterSchema;
+    const timestamp = this.legacyTimestamp(event);
+    if (timestamp === undefined) return RtcEventLogParseStatusOr.error("event.has_timestamp_us()");
+    if (!has(S, pccEvent, "id")) return RtcEventLogParseStatusOr.error("pcc_event.has_id()");
+    if (!has(S, pccEvent, "bitrateBps")) return RtcEventLogParseStatusOr.error("pcc_event.has_bitrate_bps()");
+    if (!has(S, pccEvent, "minPackets")) return RtcEventLogParseStatusOr.error("pcc_event.has_min_packets()");
+    if (!has(S, pccEvent, "minBytes")) return RtcEventLogParseStatusOr.error("pcc_event.has_min_bytes()");
+    return RtcEventLogParseStatusOr.ofValue(
+      new LoggedBweProbeClusterCreatedEvent(timestamp, pccEvent.id | 0, pccEvent.bitrateBps | 0, pccEvent.minPackets >>> 0, pccEvent.minBytes >>> 0),
+    );
+  }
+
+  private getBweProbeFailure(event: rtclog.Event): RtcEventLogParseStatusOr<LoggedBweProbeFailureEvent> {
+    const err = this.checkLegacyEvent(event, rtclog.Event_EventType.BWE_PROBE_RESULT_EVENT, "probeResult");
+    if (err) return RtcEventLogParseStatusOr.ofStatus(err);
+    const prEvent = event.subtype.value as rtclog.BweProbeResult;
+    const S = rtclog.BweProbeResultSchema;
+    const RT = rtclog.BweProbeResult_ResultType;
+    if (!has(S, prEvent, "result")) return RtcEventLogParseStatusOr.error("pr_event.has_result()");
+    if (prEvent.result === RT.SUCCESS) return RtcEventLogParseStatusOr.error("pr_event.result()!=rtclog::BweProbeResult::SUCCESS");
+    const timestamp = this.legacyTimestamp(event);
+    if (timestamp === undefined) return RtcEventLogParseStatusOr.error("event.has_timestamp_us()");
+    if (!has(S, prEvent, "id")) return RtcEventLogParseStatusOr.error("pr_event.has_id()");
+    let failureReason = ProbeFailureReason.kTimeout; // (Uninitialized upstream for other values.)
+    if (prEvent.result === RT.INVALID_SEND_RECEIVE_INTERVAL) {
+      failureReason = ProbeFailureReason.kInvalidSendReceiveInterval;
+    } else if (prEvent.result === RT.INVALID_SEND_RECEIVE_RATIO) {
+      failureReason = ProbeFailureReason.kInvalidSendReceiveRatio;
+    } else if (prEvent.result === RT.TIMEOUT) {
+      failureReason = ProbeFailureReason.kTimeout;
+    }
+    if (has(S, prEvent, "bitrateBps")) return RtcEventLogParseStatusOr.error("!pr_event.has_bitrate_bps()");
+    return RtcEventLogParseStatusOr.ofValue(new LoggedBweProbeFailureEvent(timestamp, prEvent.id | 0, failureReason));
+  }
+
+  private getBweProbeSuccess(event: rtclog.Event): RtcEventLogParseStatusOr<LoggedBweProbeSuccessEvent> {
+    const err = this.checkLegacyEvent(event, rtclog.Event_EventType.BWE_PROBE_RESULT_EVENT, "probeResult");
+    if (err) return RtcEventLogParseStatusOr.ofStatus(err);
+    const prEvent = event.subtype.value as rtclog.BweProbeResult;
+    const S = rtclog.BweProbeResultSchema;
+    if (!has(S, prEvent, "result")) return RtcEventLogParseStatusOr.error("pr_event.has_result()");
+    if (prEvent.result !== rtclog.BweProbeResult_ResultType.SUCCESS) {
+      return RtcEventLogParseStatusOr.error("pr_event.result()==rtclog::BweProbeResult::SUCCESS");
+    }
+    const timestamp = this.legacyTimestamp(event);
+    if (timestamp === undefined) return RtcEventLogParseStatusOr.error("event.has_timestamp_us()");
+    if (!has(S, prEvent, "id")) return RtcEventLogParseStatusOr.error("pr_event.has_id()");
+    if (!has(S, prEvent, "bitrateBps")) return RtcEventLogParseStatusOr.error("pr_event.has_bitrate_bps()");
+    return RtcEventLogParseStatusOr.ofValue(new LoggedBweProbeSuccessEvent(timestamp, prEvent.id | 0, prEvent.bitrateBps | 0));
+  }
+
+  private getAlrState(event: rtclog.Event): RtcEventLogParseStatusOr<LoggedAlrStateEvent> {
+    const err = this.checkLegacyEvent(event, rtclog.Event_EventType.ALR_STATE_EVENT, "alrState");
+    if (err) return RtcEventLogParseStatusOr.ofStatus(err);
+    const alrEvent = event.subtype.value as rtclog.AlrState;
+    const timestamp = this.legacyTimestamp(event);
+    if (timestamp === undefined) return RtcEventLogParseStatusOr.error("event.has_timestamp_us()");
+    if (!has(rtclog.AlrStateSchema, alrEvent, "inAlr")) return RtcEventLogParseStatusOr.error("alr_event.has_in_alr()");
+    return RtcEventLogParseStatusOr.ofValue(new LoggedAlrStateEvent(timestamp, alrEvent.inAlr));
+  }
+
+  private getIceCandidatePairConfig(rtcEvent: rtclog.Event): RtcEventLogParseStatusOr<LoggedIceCandidatePairConfig> {
+    const err = this.checkLegacyEvent(rtcEvent, rtclog.Event_EventType.ICE_CANDIDATE_PAIR_CONFIG, "");
+    if (err) return RtcEventLogParseStatusOr.ofStatus(err);
+    const config = legacySubtype(rtcEvent, "iceCandidatePairConfig", rtclog.IceCandidatePairConfigSchema);
+    const S = rtclog.IceCandidatePairConfigSchema;
+    const fail = (m: string) => RtcEventLogParseStatusOr.error<LoggedIceCandidatePairConfig>(m);
+    const res = new LoggedIceCandidatePairConfig();
+    const timestamp = this.legacyTimestamp(rtcEvent);
+    if (timestamp === undefined) return fail("rtc_event.has_timestamp_us()");
+    res.timestamp = timestamp;
+    if (!has(S, config, "configType")) return fail("config.has_config_type()");
+    res.type = getRuntimeIceCandidatePairConfigTypeLegacy(config.configType);
+    if (!has(S, config, "candidatePairId")) return fail("config.has_candidate_pair_id()");
+    res.candidatePairId = config.candidatePairId;
+    if (!has(S, config, "localCandidateType")) return fail("config.has_local_candidate_type()");
+    const localCandidateType = getRuntimeIceCandidateTypeLegacy(config.localCandidateType);
+    if (localCandidateType === undefined) return fail("GetRuntimeIceCandidateType(config.local_candidate_type(), res.local_candidate_type)");
+    res.localCandidateType = localCandidateType;
+    if (!has(S, config, "localRelayProtocol")) return fail("config.has_local_relay_protocol()");
+    res.localRelayProtocol = getRuntimeIceCandidatePairProtocolLegacy(config.localRelayProtocol);
+    if (!has(S, config, "localNetworkType")) return fail("config.has_local_network_type()");
+    res.localNetworkType = getRuntimeIceCandidateNetworkTypeLegacy(config.localNetworkType);
+    if (!has(S, config, "localAddressFamily")) return fail("config.has_local_address_family()");
+    res.localAddressFamily = getRuntimeIceCandidatePairAddressFamilyLegacy(config.localAddressFamily);
+    if (!has(S, config, "remoteCandidateType")) return fail("config.has_remote_candidate_type()");
+    const remoteCandidateType = getRuntimeIceCandidateTypeLegacy(config.remoteCandidateType);
+    if (remoteCandidateType === undefined) return fail("GetRuntimeIceCandidateType(config.remote_candidate_type(), res.remote_candidate_type)");
+    res.remoteCandidateType = remoteCandidateType;
+    if (!has(S, config, "remoteAddressFamily")) return fail("config.has_remote_address_family()");
+    res.remoteAddressFamily = getRuntimeIceCandidatePairAddressFamilyLegacy(config.remoteAddressFamily);
+    if (!has(S, config, "candidatePairProtocol")) return fail("config.has_candidate_pair_protocol()");
+    res.candidatePairProtocol = getRuntimeIceCandidatePairProtocolLegacy(config.candidatePairProtocol);
+    return RtcEventLogParseStatusOr.ofValue(res);
+  }
+
+  private getIceCandidatePairEvent(rtcEvent: rtclog.Event): RtcEventLogParseStatusOr<LoggedIceCandidatePairEvent> {
+    const err = this.checkLegacyEvent(rtcEvent, rtclog.Event_EventType.ICE_CANDIDATE_PAIR_EVENT, "");
+    if (err) return RtcEventLogParseStatusOr.ofStatus(err);
+    const event = legacySubtype(rtcEvent, "iceCandidatePairEvent", rtclog.IceCandidatePairEventSchema);
+    const S = rtclog.IceCandidatePairEventSchema;
+    const timestamp = this.legacyTimestamp(rtcEvent);
+    if (timestamp === undefined) return RtcEventLogParseStatusOr.error("rtc_event.has_timestamp_us()");
+    if (!has(S, event, "eventType")) return RtcEventLogParseStatusOr.error("event.has_event_type()");
+    if (!has(S, event, "candidatePairId")) return RtcEventLogParseStatusOr.error("event.has_candidate_pair_id()");
+    return RtcEventLogParseStatusOr.ofValue(
+      new LoggedIceCandidatePairEvent(timestamp, getRuntimeIceCandidatePairEventTypeLegacy(event.eventType), event.candidatePairId, 0),
+    );
+  }
+
+  private getRemoteEstimateEvent(event: rtclog.Event): RtcEventLogParseStatusOr<LoggedRemoteEstimateEvent> {
+    const err = this.checkLegacyEvent(event, rtclog.Event_EventType.REMOTE_ESTIMATE, "");
+    if (err) return RtcEventLogParseStatusOr.ofStatus(err);
+    const remoteEstimateEvent = legacySubtype(event, "remoteEstimate", rtclog.RemoteEstimateSchema);
+    const S = rtclog.RemoteEstimateSchema;
+    const timestamp = this.legacyTimestamp(event);
+    if (timestamp === undefined) return RtcEventLogParseStatusOr.error("event.has_timestamp_us()");
+    const res = new LoggedRemoteEstimateEvent(timestamp);
+    if (has(S, remoteEstimateEvent, "linkCapacityLowerKbps")) {
+      res.linkCapacityLower = DataRate.kilobitsPerSec(remoteEstimateEvent.linkCapacityLowerKbps);
+    }
+    if (has(S, remoteEstimateEvent, "linkCapacityUpperKbps")) {
+      res.linkCapacityUpper = DataRate.kilobitsPerSec(remoteEstimateEvent.linkCapacityUpperKbps);
+    }
+    return RtcEventLogParseStatusOr.ofValue(res);
   }
 }

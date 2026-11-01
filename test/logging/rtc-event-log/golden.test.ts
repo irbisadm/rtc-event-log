@@ -1,12 +1,16 @@
 // Golden verification: logs written by the upstream C++ encoder (random
-// events from the upstream EventGenerator) must parse to exactly what the
-// upstream C++ parser sees. Regenerate with tools/cpp-golden/build.sh.
+// events from the upstream EventGenerator), and legacy-format logs written
+// with the protobuf API, must parse to exactly what the upstream C++ parser
+// sees. Regenerate with tools/cpp-golden/build.sh.
 
 import {readdirSync, readFileSync} from "node:fs";
 import {dirname, join} from "node:path";
 import {fileURLToPath} from "node:url";
 
-import {ParsedRtcEventLog} from "../../../src/logging/rtc-event-log/rtc-event-log-parser.js";
+import {
+  ParsedRtcEventLog,
+  UnconfiguredHeaderExtensions,
+} from "../../../src/logging/rtc-event-log/rtc-event-log-parser.js";
 import {dump} from "./golden-dump.js";
 
 const dir = join(dirname(fileURLToPath(import.meta.url)), "golden");
@@ -21,7 +25,13 @@ describe("Golden logs from the upstream C++ encoder and parser", () => {
   });
 
   test.each(seeds)("%s", (seed) => {
-    const log = new ParsedRtcEventLog();
+    // legacy-default-map-*: parsed with the default header extension map for
+    // streams without a logged configuration.
+    const log = new ParsedRtcEventLog(
+      seed.startsWith("legacy-default-map-")
+        ? UnconfiguredHeaderExtensions.kAttemptWebrtcDefaultConfig
+        : UnconfiguredHeaderExtensions.kDontParse,
+    );
     const status = log.parseString(new Uint8Array(readFileSync(join(dir, `${seed}.rtc`))));
     expect(status.message()).toBe("");
     const expected = JSON.parse(readFileSync(join(dir, `${seed}.json`), "utf8"));

@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "api/field_trials.h"
+#include "logging/rtc_event_log/rtc_event_log.pb.h"
 #include "api/transport/network_types.h"
 #include "logging/rtc_event_log/events/rtc_event_rtcp_packet_incoming.h"
 #include "logging/rtc_event_log/events/rtc_event_rtp_packet_outgoing.h"
@@ -458,10 +459,318 @@ std::string Dump(const ParsedRtcEventLog& log) {
 }  // namespace
 }  // namespace webrtc
 
+namespace webrtc {
+namespace {
+
+// Legacy format (rtc_event_log.proto): there is no upstream encoder for it
+// any more, so the events are written with the protobuf API directly, one
+// event per EventStream message as the old encoder did.
+class LegacyWriter {
+ public:
+  explicit LegacyWriter(uint64_t seed) : prng_(seed) {}
+
+  std::string Generate() {
+    int64_t t = 1'000'000'000;
+    auto next = [&]() { t += prng_.Rand(0, 20'000); return t; };
+    Event(next(), rtclog::Event::LOG_START);
+
+    // Streams and their header extensions.
+    const uint32_t video_in = 0x1100, video_in_rtx = 0x1101, audio_in = 0x1200;
+    const uint32_t video_out = 0x2100, video_out_rtx = 0x2101, audio_out = 0x2200;
+    const std::vector<RtpExtension> ext_video_in = RandomExtensions();
+    const std::vector<RtpExtension> ext_audio_in = RandomExtensions();
+    const std::vector<RtpExtension> ext_video_out = RandomExtensions();
+    const std::vector<RtpExtension> ext_audio_out = RandomExtensions();
+    {
+      auto* e = Event(next(), rtclog::Event::VIDEO_RECEIVER_CONFIG_EVENT);
+      auto* c = e->mutable_video_receiver_config();
+      c->set_remote_ssrc(video_in);
+      c->set_local_ssrc(1);
+      c->set_rtcp_mode(prng_.Rand<bool>() ? rtclog::VideoReceiveConfig::RTCP_COMPOUND
+                                          : rtclog::VideoReceiveConfig::RTCP_REDUCEDSIZE);
+      c->set_remb(prng_.Rand<bool>());
+      auto* rtx = c->add_rtx_map();
+      rtx->set_payload_type(96);
+      rtx->mutable_config()->set_rtx_ssrc(video_in_rtx);
+      rtx->mutable_config()->set_rtx_payload_type(97);
+      AddExtensions(ext_video_in, c->mutable_header_extensions());
+      auto* d = c->add_decoders();
+      d->set_name("VP8");
+      d->set_payload_type(96);
+      d = c->add_decoders();
+      d->set_name("H264");
+      d->set_payload_type(100);
+    }
+    {
+      auto* e = Event(next(), rtclog::Event::VIDEO_SENDER_CONFIG_EVENT);
+      auto* c = e->mutable_video_sender_config();
+      c->add_ssrcs(video_out);
+      c->add_rtx_ssrcs(video_out_rtx);
+      c->set_rtx_payload_type(97);
+      AddExtensions(ext_video_out, c->mutable_header_extensions());
+      c->mutable_encoder()->set_name("VP8");
+      c->mutable_encoder()->set_payload_type(96);
+    }
+    {
+      auto* e = Event(next(), rtclog::Event::AUDIO_RECEIVER_CONFIG_EVENT);
+      e->mutable_audio_receiver_config()->set_remote_ssrc(audio_in);
+      e->mutable_audio_receiver_config()->set_local_ssrc(1);
+      AddExtensions(ext_audio_in, e->mutable_audio_receiver_config()->mutable_header_extensions());
+    }
+    {
+      auto* e = Event(next(), rtclog::Event::AUDIO_SENDER_CONFIG_EVENT);
+      e->mutable_audio_sender_config()->set_ssrc(audio_out);
+      AddExtensions(ext_audio_out, e->mutable_audio_sender_config()->mutable_header_extensions());
+    }
+
+    SimulatedClock clock(Timestamp::Micros(t));
+    test::EventGenerator gen(prng_.Rand<uint32_t>() + 1, &clock);
+    std::vector<uint8_t> last_rtcp;
+    for (int i = 0; i < 400; ++i) {
+      switch (prng_.Rand(0, 19)) {
+        case 0: case 1: case 2: case 3: case 4: case 5: {
+          // RTP. Streams without a logged config (0x3xxx) exercise the default
+          // header extension map.
+          const bool incoming = prng_.Rand<bool>();
+          uint32_t ssrc;
+          const std::vector<RtpExtension>* ext;
+          switch (prng_.Rand(0, 3)) {
+            case 0: ssrc = incoming ? video_in : video_out; ext = incoming ? &ext_video_in : &ext_video_out; break;
+            case 1: ssrc = incoming ? video_in_rtx : video_out_rtx; ext = incoming ? &ext_video_in : &ext_video_out; break;
+            case 2: ssrc = incoming ? audio_in : audio_out; ext = incoming ? &ext_audio_in : &ext_audio_out; break;
+            default: ssrc = 0x3000 + prng_.Rand(0, 2); ext = &default_extensions_; break;
+          }
+          Rtp(next(), incoming, ssrc, *ext);
+          break;
+        }
+        case 6: case 7: {
+          const bool incoming = prng_.Rand<bool>();
+          std::vector<uint8_t> packet;
+          if (incoming && !last_rtcp.empty() && prng_.Rand(0, 3) == 0) {
+            packet = last_rtcp;  // logged twice, for audio and video
+          } else {
+            auto event = incoming ? gen.NewRtcpPacketIncoming() : nullptr;
+            if (event) {
+              packet.assign(event->packet().begin(), event->packet().end());
+            } else {
+              auto out = gen.NewRtcpPacketOutgoing();
+              packet.assign(out->packet().begin(), out->packet().end());
+            }
+          }
+          if (incoming) last_rtcp = packet;
+          auto* e = Event(next(), rtclog::Event::RTCP_EVENT);
+          e->mutable_rtcp_packet()->set_incoming(incoming);
+          e->mutable_rtcp_packet()->set_type(rtclog::VIDEO);
+          e->mutable_rtcp_packet()->set_packet_data(packet.data(), packet.size());
+          break;
+        }
+        case 8: {
+          auto* e = Event(next(), rtclog::Event::AUDIO_PLAYOUT_EVENT);
+          e->mutable_audio_playout_event()->set_local_ssrc(prng_.Rand<bool>() ? audio_in : audio_in + 7);
+          break;
+        }
+        case 9: {
+          auto* e = Event(next(), rtclog::Event::LOSS_BASED_BWE_UPDATE);
+          e->mutable_loss_based_bwe_update()->set_bitrate_bps(prng_.Rand(0, 5'000'000));
+          e->mutable_loss_based_bwe_update()->set_fraction_loss(prng_.Rand(0, 300));
+          e->mutable_loss_based_bwe_update()->set_total_packets(prng_.Rand(0, 1000));
+          break;
+        }
+        case 10: {
+          auto* e = Event(next(), rtclog::Event::DELAY_BASED_BWE_UPDATE);
+          e->mutable_delay_based_bwe_update()->set_bitrate_bps(prng_.Rand(0, 5'000'000));
+          e->mutable_delay_based_bwe_update()->set_detector_state(
+              static_cast<rtclog::DelayBasedBweUpdate::DetectorState>(prng_.Rand(0, 2)));
+          break;
+        }
+        case 11: {
+          auto* e = Event(next(), rtclog::Event::AUDIO_NETWORK_ADAPTATION_EVENT);
+          auto* a = e->mutable_audio_network_adaptation();
+          if (prng_.Rand<bool>()) a->set_bitrate_bps(prng_.Rand(6000, 510000));
+          if (prng_.Rand<bool>()) a->set_frame_length_ms(20 * prng_.Rand(1, 6));
+          if (prng_.Rand<bool>()) a->set_uplink_packet_loss_fraction(prng_.Rand<float>());
+          if (prng_.Rand<bool>()) a->set_enable_fec(prng_.Rand<bool>());
+          if (prng_.Rand<bool>()) a->set_enable_dtx(prng_.Rand<bool>());
+          if (prng_.Rand<bool>()) a->set_num_channels(prng_.Rand(1, 2));
+          break;
+        }
+        case 12: {
+          auto* e = Event(next(), rtclog::Event::BWE_PROBE_CLUSTER_CREATED_EVENT);
+          auto* p = e->mutable_probe_cluster();
+          p->set_id(prng_.Rand(1, 1000));
+          p->set_bitrate_bps(prng_.Rand(0, 5'000'000));
+          p->set_min_packets(prng_.Rand(1, 20));
+          p->set_min_bytes(prng_.Rand(100, 20000));
+          break;
+        }
+        case 13: {
+          auto* e = Event(next(), rtclog::Event::BWE_PROBE_RESULT_EVENT);
+          auto* p = e->mutable_probe_result();
+          p->set_id(prng_.Rand(1, 1000));
+          const auto result = static_cast<rtclog::BweProbeResult::ResultType>(prng_.Rand(0, 3));
+          p->set_result(result);
+          if (result == rtclog::BweProbeResult::SUCCESS) p->set_bitrate_bps(prng_.Rand(0, 5'000'000));
+          break;
+        }
+        case 14: {
+          auto* e = Event(next(), rtclog::Event::ALR_STATE_EVENT);
+          e->mutable_alr_state()->set_in_alr(prng_.Rand<bool>());
+          break;
+        }
+        case 15: {
+          auto* e = Event(next(), rtclog::Event::ICE_CANDIDATE_PAIR_CONFIG);
+          auto* c = e->mutable_ice_candidate_pair_config();
+          c->set_config_type(static_cast<rtclog::IceCandidatePairConfig::IceCandidatePairConfigType>(prng_.Rand(0, 3)));
+          c->set_candidate_pair_id(prng_.Rand(1, 5));
+          c->set_local_candidate_type(static_cast<rtclog::IceCandidatePairConfig::IceCandidateType>(prng_.Rand(0, 3)));
+          c->set_local_relay_protocol(static_cast<rtclog::IceCandidatePairConfig::Protocol>(prng_.Rand(0, 4)));
+          c->set_local_network_type(static_cast<rtclog::IceCandidatePairConfig::NetworkType>(prng_.Rand(0, 5)));
+          c->set_local_address_family(static_cast<rtclog::IceCandidatePairConfig::AddressFamily>(prng_.Rand(0, 2)));
+          c->set_remote_candidate_type(static_cast<rtclog::IceCandidatePairConfig::IceCandidateType>(prng_.Rand(0, 3)));
+          c->set_remote_address_family(static_cast<rtclog::IceCandidatePairConfig::AddressFamily>(prng_.Rand(0, 2)));
+          c->set_candidate_pair_protocol(static_cast<rtclog::IceCandidatePairConfig::Protocol>(prng_.Rand(0, 4)));
+          break;
+        }
+        case 16: {
+          auto* e = Event(next(), rtclog::Event::ICE_CANDIDATE_PAIR_EVENT);
+          e->mutable_ice_candidate_pair_event()->set_event_type(
+              static_cast<rtclog::IceCandidatePairEvent::IceCandidatePairEventType>(prng_.Rand(0, 3)));
+          e->mutable_ice_candidate_pair_event()->set_candidate_pair_id(prng_.Rand(1, 5));
+          break;
+        }
+        case 17: {
+          auto* e = Event(next(), rtclog::Event::REMOTE_ESTIMATE);
+          if (prng_.Rand<bool>()) e->mutable_remote_estimate()->set_link_capacity_lower_kbps(prng_.Rand(0, 10000));
+          if (prng_.Rand<bool>()) e->mutable_remote_estimate()->set_link_capacity_upper_kbps(prng_.Rand(0, 10000));
+          break;
+        }
+        default:
+          Event(next(), rtclog::Event::UNKNOWN_EVENT);
+          break;
+      }
+    }
+    Event(next(), rtclog::Event::LOG_END);
+    return out_;
+  }
+
+ private:
+  rtclog::Event* Event(int64_t timestamp_us, rtclog::Event::EventType type) {
+    Flush();
+    pending_.Clear();
+    rtclog::Event* e = pending_.add_stream();
+    e->set_timestamp_us(timestamp_us);
+    e->set_type(type);
+    has_pending_ = true;
+    return e;
+  }
+
+  void Flush() {
+    if (has_pending_) out_ += pending_.SerializeAsString();
+    has_pending_ = false;
+  }
+
+  std::vector<RtpExtension> RandomExtensions() {
+    // Distinct ids 1..14 for the extensions GetHeader() reads, plus one that
+    // collides with an earlier id (ignored on registration).
+    const char* uris[] = {RtpExtension::kTimestampOffsetUri, RtpExtension::kAbsSendTimeUri,
+                          RtpExtension::kTransportSequenceNumberUri, RtpExtension::kAudioLevelUri,
+                          RtpExtension::kVideoRotationUri, RtpExtension::kTransportSequenceNumberV2Uri};
+    std::vector<int> ids = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14};
+    std::vector<RtpExtension> result;
+    for (const char* uri : uris) {
+      if (prng_.Rand(0, 4) == 0) continue;
+      const int i = prng_.Rand(0, ids.size() - 1);
+      result.emplace_back(uri, RtpHeaderExtensionId(ids[i]));
+      ids.erase(ids.begin() + i);
+    }
+    if (!result.empty() && prng_.Rand<bool>()) {
+      result.emplace_back(RtpExtension::kMidUri, result.front().id);
+    }
+    return result;
+  }
+
+  void AddExtensions(const std::vector<RtpExtension>& extensions,
+                     google::protobuf::RepeatedPtrField<rtclog::RtpHeaderExtension>* out) {
+    for (const auto& e : extensions) {
+      auto* x = out->Add();
+      x->set_name(e.uri);
+      x->set_id(e.id.value());
+    }
+  }
+
+  void Rtp(int64_t timestamp_us, bool incoming, uint32_t ssrc, const std::vector<RtpExtension>& extensions) {
+    const RtpHeaderExtensionMap map(extensions);
+    RtpPacketToSend packet(&map);
+    packet.SetMarker(prng_.Rand<bool>());
+    packet.SetPayloadType(prng_.Rand(0, 127));
+    packet.SetSequenceNumber(prng_.Rand<uint16_t>());
+    packet.SetTimestamp(prng_.Rand<uint32_t>());
+    packet.SetSsrc(ssrc);
+    if (prng_.Rand(0, 3) == 0) packet.SetCsrcs(std::vector<uint32_t>{prng_.Rand<uint32_t>()});
+    if (prng_.Rand(0, 3)) packet.SetExtension<TransmissionOffset>(prng_.Rand(-0x7fffff, 0x7fffff));
+    if (prng_.Rand(0, 3)) packet.SetExtension<AbsoluteSendTime>(prng_.Rand(0, 0xffffff));
+    if (prng_.Rand(0, 3)) packet.SetExtension<TransportSequenceNumber>(prng_.Rand<uint16_t>());
+    if (prng_.Rand(0, 3)) packet.SetExtension<TransportSequenceNumberV2>(prng_.Rand<uint16_t>(), std::nullopt);
+    if (prng_.Rand(0, 3)) packet.SetExtension<AudioLevelExtension>(AudioLevel(prng_.Rand<bool>(), prng_.Rand(0, 127)));
+    if (prng_.Rand(0, 3)) packet.SetExtension<VideoOrientation>(prng_.Rand(0, 255));
+    packet.SetPayloadSize(prng_.Rand(0, 1200));
+    if (prng_.Rand(0, 4) == 0) packet.SetPadding(prng_.Rand(1, 200));
+    auto* e = Event(timestamp_us, rtclog::Event::RTP_EVENT);
+    auto* rtp = e->mutable_rtp_packet();
+    rtp->set_incoming(incoming);
+    rtp->set_type(rtclog::VIDEO);
+    rtp->set_packet_length(packet.size());
+    rtp->set_header(packet.data(), packet.headers_size());
+  }
+
+ public:
+  ~LegacyWriter() = default;
+
+ private:
+  Random prng_;
+  rtclog::EventStream pending_;
+  bool has_pending_ = false;
+  std::string out_;
+  // The default map's assignment (GetDefaultHeaderExtensionMap ids).
+  const std::vector<RtpExtension> default_extensions_ = {
+      {RtpExtension::kAudioLevelUri, RtpHeaderExtensionId(1)},
+      {RtpExtension::kTimestampOffsetUri, RtpHeaderExtensionId(2)},
+      {RtpExtension::kAbsSendTimeUri, RtpHeaderExtensionId(3)},
+      {RtpExtension::kVideoRotationUri, RtpHeaderExtensionId(4)},
+      {RtpExtension::kTransportSequenceNumberUri, RtpHeaderExtensionId(5)}};
+
+ public:
+  std::string Finish() {
+    Flush();
+    return out_;
+  }
+};
+
+}  // namespace
+}  // namespace webrtc
+
 int main(int argc, char** argv) {
   using namespace webrtc;
+  // golden legacy <seed> <default-map 0|1> <out.rtc> <out.json>
+  if (argc == 6 && std::string(argv[1]) == "legacy") {
+    const uint64_t seed = std::strtoull(argv[2], nullptr, 10);
+    LegacyWriter writer(seed);
+    writer.Generate();
+    const std::string encoded = writer.Finish();
+    ParsedRtcEventLog parsed(std::string(argv[3]) == "1"
+                                 ? ParsedRtcEventLog::UnconfiguredHeaderExtensions::kAttemptWebrtcDefaultConfig
+                                 : ParsedRtcEventLog::UnconfiguredHeaderExtensions::kDontParse);
+    auto status = parsed.ParseString(encoded);
+    if (!status.ok()) {
+      fprintf(stderr, "parse failed: %s\n", status.message().c_str());
+      return 1;
+    }
+    std::ofstream(argv[4], std::ios::binary) << encoded;
+    std::ofstream(argv[5]) << Dump(parsed) << "\n";
+    return 0;
+  }
   if (argc != 4) {
-    fprintf(stderr, "usage: golden <seed> <out.rtc> <out.json>\n");
+    fprintf(stderr, "usage: golden <seed> <out.rtc> <out.json>\n       golden legacy <seed> <default-map 0|1> <out.rtc> <out.json>\n");
     return 2;
   }
   const uint64_t seed = std::strtoull(argv[1], nullptr, 10);

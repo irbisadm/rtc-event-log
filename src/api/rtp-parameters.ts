@@ -18,6 +18,12 @@ export class RtpExtension {
   static readonly kMidUri = "urn:ietf:params:rtp-hdrext:sdes:mid";
   static readonly kRidUri = "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id";
   static readonly kRepairedRidUri = "urn:ietf:params:rtp-hdrext:sdes:repaired-rtp-stream-id";
+  static readonly kGenericFrameDescriptorUri00 = "http://www.webrtc.org/experiments/rtp-hdrext/generic-frame-descriptor-00";
+  static readonly kVideoLayersAllocationUri = "http://www.webrtc.org/experiments/rtp-hdrext/video-layers-allocation00";
+  static readonly kColorSpaceUri = "http://www.webrtc.org/experiments/rtp-hdrext/color-space";
+  static readonly kVideoFrameTrackingIdUri = "http://www.webrtc.org/experiments/rtp-hdrext/video-frame-tracking-id";
+  static readonly kCsrcAudioLevelsUri = "urn:ietf:params:rtp-hdrext:csrc-audio-level";
+  static readonly kCorruptionDetectionUri = "http://www.webrtc.org/experiments/rtp-hdrext/corruption-detection";
 
   constructor(
     public uri = "",
