@@ -121,6 +121,11 @@ export class BitstreamReader {
   }
 
   readString(numBytes: number): Uint8Array {
+    if (numBytes * 8 > this.remainingBits) {
+      // Same outcome as reading byte by byte past the end.
+      this.invalidate();
+      return new Uint8Array(0);
+    }
     const result = new Uint8Array(numBytes);
     for (let i = 0; i < numBytes; ++i) {
       result[i] = this.readUint8();

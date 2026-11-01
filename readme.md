@@ -2,7 +2,7 @@
 
 A parser for WebRTC **RtcEventLog** files (the logs Chrome writes from `chrome://webrtc-internals` and native libwebrtc clients produce via `RtcEventLog`) for JavaScript and TypeScript, ported from libwebrtc's `logging/rtc_event_log`.
 
-Status: **work in progress** — the protobuf layer of the new log format decodes and the field encodings (varint, blob and delta encoding) are ported byte-exact; typed events are being ported (see [PORTING_PLAN.md](PORTING_PLAN.md)).
+Status: **work in progress** — the protobuf layer of the new log format decodes and the field encodings (varint, blob and delta encoding) are ported byte-exact; `ParsedRtcEventLog` parses RTP/RTCP packets and begin/end log events, other event types are being ported (see [PORTING_PLAN.md](PORTING_PLAN.md)).
 
 ## Upstream revision
 
@@ -12,11 +12,17 @@ Ported from libwebrtc **M154** — `branch-heads/8037` @ [`7cb44cfa`](https://we
 
 ```ts
 import {readFileSync} from "node:fs";
-import {decodeEventStream} from "@irbisadm/rtc-event-log";
+import {ParsedRtcEventLog} from "@irbisadm/rtc-event-log";
 
-const stream = decodeEventStream(readFileSync("event_log.rtc"));
-console.log(stream.outgoingRtpPackets.length, stream.delayBasedBweUpdates.length);
+const log = new ParsedRtcEventLog();
+const status = log.parseString(readFileSync("event_log.rtc"));
+if (!status.ok()) throw new Error(status.message());
+for (const stream of log.outgoingRtpPacketsBySsrc()) {
+  console.log(stream.ssrc, stream.outgoingPackets.length);
+}
 ```
+
+The API mirrors upstream `ParsedRtcEventLog` in camelCase. Times are `Timestamp`s: microseconds as a `number` (±`Infinity` for upstream's infinities). `decodeEventStream()` exposes the raw protobuf layer.
 
 ## Development
 
