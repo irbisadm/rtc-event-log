@@ -1,0 +1,40 @@
+name: Publish
+
+# Publishes to npm with trusted publishing (OIDC): no npm token is stored in
+# the repository. npmjs.com → @irbisadm/rtc-event-log → Settings → Trusted
+# Publisher must list this repository and the workflow file `publish.yml`.
+# Runs when a GitHub release is published; the release tag must be
+# `v<version from package.json>`.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write # OIDC token for npm trusted publishing (and provenance)
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: yarn
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm >= 11.5.1.
+      - run: npm install -g npm@latest
+      - name: Check that the tag matches the package version
+        run: |
+          version=$(node -p "require('./package.json').version")
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "Release tag ${GITHUB_REF_NAME} does not match package version v${version}" >&2
+            exit 1
+          fi
+      - run: yarn install --frozen-lockfile
+      - run: yarn typecheck
+      - run: yarn test
+      - run: yarn build
+      - run: npm publish

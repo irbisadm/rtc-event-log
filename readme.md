@@ -48,6 +48,10 @@ git -C cpp sparse-checkout set --no-cone /logging/rtc_event_log/ /modules/rtp_rt
 git -C cpp checkout origin/branch-heads/8037
 ```
 
+## Releasing
+
+Releases are published to npm by `.github/workflows/publish.yml` with npm trusted publishing (OIDC, with provenance); no npm token is stored in the repository. Bump `version` in `package.json`, commit, then publish a GitHub release tagged `v<version>` — the workflow checks the tag, runs the type check, tests and build, and runs `npm publish`.
+
 ## Related
 
 [goog-cc-as](https://github.com/irbisadm/goog-cc-as) — libwebrtc's GoogCC congestion controller in AssemblyScript; it will use this parser to replay real event logs through its controller.

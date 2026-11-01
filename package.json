@@ -1,7 +1,6 @@
 {
   "name": "@irbisadm/rtc-event-log",
   "version": "0.1.0",
-  "private": true,
   "description": "WebRTC RtcEventLog parser for JavaScript/TypeScript, ported from libwebrtc (WIP)",
   "author": {
     "email": "i@irbisadm.dev",
@@ -9,21 +8,39 @@
     "url": "https://github.com/irbisadm"
   },
   "license": "BSD-3-Clause",
-  "repository": "https://github.com/irbisadm/rtc-event-log",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/irbisadm/rtc-event-log.git"
+  },
   "bugs": "https://github.com/irbisadm/rtc-event-log/issues",
   "type": "module",
   "module": "./dist/index.mjs",
   "main": "./dist/index.mjs",
   "types": "./types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "import": "./dist/index.mjs"
+    }
+  },
   "files": [
     "./dist/index.mjs",
     "./types/index.d.ts",
     "./readme.md",
     "./LICENSE"
   ],
-  "keywords": ["webrtc", "rtc-event-log", "rtceventlog", "bandwidth-estimation", "parser"],
+  "keywords": [
+    "webrtc",
+    "rtc-event-log",
+    "rtceventlog",
+    "bandwidth-estimation",
+    "parser"
+  ],
   "engines": {
     "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "rollup -c",
