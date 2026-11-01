@@ -1,5 +1,5 @@
 {
-  "name": "rtc-event-log",
+  "name": "@irbisadm/rtc-event-log",
   "version": "0.1.0",
   "private": true,
   "description": "WebRTC RtcEventLog parser for JavaScript/TypeScript, ported from libwebrtc (WIP)",

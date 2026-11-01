@@ -12,7 +12,7 @@ Ported from libwebrtc **M154** — `branch-heads/8037` @ [`7cb44cfa`](https://we
 
 ```ts
 import {readFileSync} from "node:fs";
-import {decodeEventStream} from "rtc-event-log";
+import {decodeEventStream} from "@irbisadm/rtc-event-log";
 
 const stream = decodeEventStream(readFileSync("event_log.rtc"));
 console.log(stream.outgoingRtpPackets.length, stream.delayBasedBweUpdates.length);
