@@ -23,6 +23,11 @@ export class Random {
     return (s * 2685821657736338717n) & kMask64;
   }
 
+  // Rand<uint32_t>(): the low 32 bits of the next output.
+  randU32(): number {
+    return Number(this.nextOutput() & 0xffffffffn);
+  }
+
   // Rand(uint32_t t): uniform in [0, t].
   rand(t: number): number {
     const x = this.nextOutput() & 0xffffffffn;
