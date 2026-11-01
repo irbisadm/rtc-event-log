@@ -5,7 +5,7 @@ Upstream: `branch-heads/8037` @ `7cb44cfa`; `rel/` = `logging/rtc_event_log/`.
 | # | Stage | Upstream | State |
 |---|---|---|---|
 | 0 | Scaffold, protobuf layer of the new format (`decodeEventStream`) | `rel/rtc_event_log2.proto` | done |
-| 1 | Encoding primitives: varint, blob encoding, delta encoding (encode + decode) with unittests | `rel/encoder/{var_int,blob_encoding,delta_encoding}` | |
+| 1 | Encoding primitives: varint, blob encoding, delta encoding (encode + decode), signedness helpers, bit reader/writer; upstream unittests plus byte-exact vectors from the C++ encoders (`tools/cpp-vectors`) | `rel/encoder/{var_int,blob_encoding,delta_encoding,bit_writer,rtc_event_log_encoder_common}`, `rtc_base/bitstream_reader` | done |
 | 2 | RTP/RTCP packet events (headers, extensions, raw RTCP), batch expansion of base + delta fields | `rel/rtc_event_log_parser.cc` (`StoreRtpPackets`, `StoreRtcpPackets`) | |
 | 3 | BWE events: delay/loss-based updates, probe clusters/results, ALR, route change, remote estimates, Scream | `rel/rtc_event_log_parser.cc`, `rel/events/*` | |
 | 4 | Remaining events: begin/end log, stream configs, ICE, DTLS, audio playout, frame decoded, generic packets, ANA, NetEq | `rel/rtc_event_log_parser.cc`, `rel/events/*` | |

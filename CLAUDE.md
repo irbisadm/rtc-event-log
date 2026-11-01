@@ -19,6 +19,7 @@ yarn test              # jest (ESM via ts-jest); single file: yarn test test/foo
 yarn typecheck         # tsc --noEmit
 yarn build             # rollup -> dist/index.mjs + types/index.d.ts
 yarn gen:proto         # protoc + protoc-gen-es: proto/rtc_event_log2.proto -> src/gen (committed)
+sh tools/cpp-vectors/build.sh  # build the upstream C++ encoders from cpp/ and rewrite test/.../encoder/cpp-vectors.json
 ```
 
 ## Conventions
@@ -27,4 +28,5 @@ yarn gen:proto         # protoc + protoc-gen-es: proto/rtc_event_log2.proto -> s
 - One upstream `.h/.cc` → one `.ts` under `src/` mirroring the upstream path in kebab-case (`logging/rtc_event_log/encoder/delta_encoding.cc` → `src/logging/rtc-event-log/encoder/delta-encoding.ts`). First line: `// Port of <upstream path> @ M154.` Tests mirror under `test/` and port the upstream unittests.
 - `src/gen/` is generated — do not edit; regenerate with `yarn gen:proto` after updating `proto/` from `cpp/`.
 - 64-bit protobuf fields are `bigint`; keep 64-bit arithmetic of upstream (timestamps, deltas) in `bigint` where values can exceed 2^53.
+- Bit-exactness: upstream unittests are mostly round-trips, so byte-level output is also checked against vectors produced by the upstream C++ (`tools/cpp-vectors`, checked-in JSON next to the test). Test-only upstream helpers (e.g. `rtc_base/random.h` → `test/rtc-base/random.ts`) live under `test/`.
 - ESM throughout: relative imports end in `.js` (resolved to `.ts` by jest/rollup).

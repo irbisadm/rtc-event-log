@@ -2,7 +2,7 @@
 
 A parser for WebRTC **RtcEventLog** files (the logs Chrome writes from `chrome://webrtc-internals` and native libwebrtc clients produce via `RtcEventLog`) for JavaScript and TypeScript, ported from libwebrtc's `logging/rtc_event_log`.
 
-Status: **work in progress** — the protobuf layer of the new log format decodes; typed events are being ported (see [PORTING_PLAN.md](PORTING_PLAN.md)).
+Status: **work in progress** — the protobuf layer of the new log format decodes and the field encodings (varint, blob and delta encoding) are ported byte-exact; typed events are being ported (see [PORTING_PLAN.md](PORTING_PLAN.md)).
 
 ## Upstream revision
 
@@ -27,6 +27,7 @@ yarn test          # jest
 yarn typecheck
 yarn build         # dist/index.mjs + types/index.d.ts
 yarn gen:proto     # regenerate src/gen from proto/ (needs protoc)
+sh tools/cpp-vectors/build.sh   # refresh encoder test vectors from the C++ in cpp/ (needs c++ and abseil)
 ```
 
 `cpp/` (gitignored) is a blob-less sparse clone of libwebrtc at the pinned revision, used as the porting reference:
