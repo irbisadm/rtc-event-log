@@ -11,6 +11,7 @@ set(WEBRTC_SOURCES
   logging/rtc_event_log/encoder/optional_blob_encoding.cc
   logging/rtc_event_log/encoder/rtc_event_log_encoder_common.cc
   logging/rtc_event_log/encoder/rtc_event_log_encoder_new_format.cc
+  logging/rtc_event_log/encoder/rtc_event_log_encoder_v3.cc
   logging/rtc_event_log/encoder/var_int.cc
   modules/rtp_rtcp/source/rtcp_packet.cc
   modules/rtp_rtcp/source/rtp_packet.cc

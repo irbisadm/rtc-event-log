@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds the golden generator against cpp/ and refreshes the golden logs:
-# test/logging/rtc-event-log/golden/{seed,legacy,legacy-default-map}-<N>.{rtc,json}.
+# test/logging/rtc-event-log/golden/{seed,legacy,legacy-default-map,v3}-<N>.{rtc,json}.
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 build=${TMPDIR:-/tmp}/rtc-event-log-cpp-golden
@@ -15,5 +15,9 @@ done
 for seed in 1 2 3 4; do
   "$build/golden" legacy "$seed" 0 "$out/legacy-$seed.rtc" "$out/legacy-$seed.json"
   "$build/golden" legacy "$seed" 1 "$out/legacy-default-map-$seed.rtc" "$out/legacy-default-map-$seed.json"
+done
+# v3 format.
+for seed in 1 2 3 4; do
+  "$build/golden" v3 "$seed" "$out/v3-$seed.rtc" "$out/v3-$seed.json"
 done
 echo "wrote $out"

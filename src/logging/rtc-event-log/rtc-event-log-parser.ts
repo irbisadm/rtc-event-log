@@ -1,10 +1,12 @@
 // Port of logging/rtc_event_log/rtc_event_log_parser.h @ M154.
 //
-// Status of the port (see PORTING_PLAN.md): all event types of the new
-// (protobuf) format, including the parsed RTCP blocks; the legacy and v3
-// formats are rejected.
+// Status of the port (see PORTING_PLAN.md): the legacy, new (protobuf) and v3
+// formats, including the parsed RTCP blocks. As upstream, the v3 format only
+// yields the events whose v3 parser is implemented (begin/end log, ALR state,
+// audio playout, delay-based BWE updates).
 
 import {create, type DescMessage, fromBinary, type MessageShape} from "@bufbuild/protobuf";
+import {RtcEventType} from "../../api/rtc-event-log/rtc-event.js";
 
 import * as rtclog from "../../gen/rtc_event_log_pb.js";
 import {RtpHeaderExtensionMap} from "../../modules/rtp-rtcp/include/rtp-header-extension-map.js";
@@ -138,9 +140,9 @@ import {
 } from "./events/logged-rtp-rtcp.js";
 import {RtcEventProcessor} from "./rtc-event-processor.js";
 import {rtcpTypeOrder, rtpTransportSeqNum, rtpTypeOrder, TypeOrder} from "./rtc-event-processor-order.js";
-import {LoggedAlrStateEvent} from "./events/rtc-event-alr-state.js";
+import {LoggedAlrStateEvent, RtcEventAlrState} from "./events/rtc-event-alr-state.js";
 import {LoggedAudioNetworkAdaptationEvent} from "./events/rtc-event-audio-network-adaptation.js";
-import {LoggedAudioPlayoutEvent} from "./events/rtc-event-audio-playout.js";
+import {LoggedAudioPlayoutEvent, RtcEventAudioPlayout} from "./events/rtc-event-audio-playout.js";
 import {LoggedAudioRecvConfig} from "./events/rtc-event-audio-receive-stream-config.js";
 import {LoggedAudioSendConfig} from "./events/rtc-event-audio-send-stream-config.js";
 import {LoggedDtlsTransportState} from "./events/rtc-event-dtls-transport-state.js";
@@ -157,11 +159,11 @@ import {IceCandidatePairEventType, LoggedIceCandidatePairEvent} from "./events/r
 import {LoggedNetEqSetMinimumDelayEvent} from "./events/rtc-event-neteq-set-minimum-delay.js";
 import {LoggedVideoRecvConfig} from "./events/rtc-event-video-receive-stream-config.js";
 import {LoggedVideoSendConfig} from "./events/rtc-event-video-send-stream-config.js";
-import {LoggedStartEvent} from "./events/rtc-event-begin-log.js";
-import {LoggedBweDelayBasedUpdate} from "./events/rtc-event-bwe-update-delay-based.js";
+import {LoggedStartEvent, RtcEventBeginLog} from "./events/rtc-event-begin-log.js";
+import {LoggedBweDelayBasedUpdate, RtcEventBweUpdateDelayBased} from "./events/rtc-event-bwe-update-delay-based.js";
 import {LoggedBweLossBasedUpdate} from "./events/rtc-event-bwe-update-loss-based.js";
 import {LoggedBweScreamUpdate} from "./events/rtc-event-bwe-update-scream.js";
-import {LoggedStopEvent} from "./events/rtc-event-end-log.js";
+import {LoggedStopEvent, RtcEventEndLog} from "./events/rtc-event-end-log.js";
 import {LoggedBweProbeClusterCreatedEvent} from "./events/rtc-event-probe-cluster-created.js";
 import {LoggedBweProbeFailureEvent, ProbeFailureReason} from "./events/rtc-event-probe-result-failure.js";
 import {LoggedBweProbeSuccessEvent} from "./events/rtc-event-probe-result-success.js";
@@ -181,8 +183,6 @@ const kDefaultOverhead = kUdpOverhead + kSrtpOverhead + kIpv4Overhead;
 
 const kIncompleteLogError = "Could not parse the entire log. Only the beginning will be used.";
 
-// RtcEvent::Type::BeginV3Log (api/rtc_event_log/rtc_event.h).
-const kBeginV3LogType = 0x2501580n;
 
 const kU8Max = 0xffn;
 const kU16Max = 0xffffn;
@@ -2051,6 +2051,75 @@ export class ParsedRtcEventLog {
     return this.firstLogSegmentValue;
   }
 
+  // The per-event parse statuses are ignored, like upstream: an event that
+  // fails to parse leaves default-constructed entries behind, and events whose
+  // v3 parser is not implemented upstream ("Not Implemented") are dropped.
+  private parseStreamInternalV3(s: Uint8Array): ParseStatus {
+    const kMaxEventSize = 10000000n; // Sanity check.
+    let expectBeginLogEvent = true;
+
+    while (s.length !== 0) {
+      // Read event type.
+      const tagResult = decodeVarInt(s);
+      if (!tagResult.success) return ParseStatus.error("Failed to read event type.");
+      s = tagResult.rest;
+      const eventTag = tagResult.value;
+      const batched = (eventTag & 1n) !== 0n;
+      const eventType = eventTag >> 1n;
+
+      // Read event size
+      const sizeResult = decodeVarInt(s);
+      if (!sizeResult.success) return ParseStatus.error("Failed to read event size.");
+      s = sizeResult.rest;
+      const eventSizeBytes = sizeResult.value;
+      if (eventSizeBytes > kMaxEventSize || eventSizeBytes > BigInt(s.length)) {
+        // Event size is too large.
+        if (!(eventSizeBytes <= kMaxEventSize)) return ParseStatus.error("event_size_bytes<=kMaxEventSize");
+        if (!(eventSizeBytes <= BigInt(s.length))) return ParseStatus.error("event_size_bytes<=s.size()");
+      }
+
+      // Read remaining event fields into a buffer.
+      const eventFields = s.subarray(0, Number(eventSizeBytes));
+      s = s.subarray(Number(eventSizeBytes));
+
+      if (expectBeginLogEvent) {
+        if (eventType !== BigInt(RtcEventType.BeginV3Log)) {
+          return ParseStatus.error("event_type==static_cast<uint32_t>(RtcEvent::Type::BeginV3Log)");
+        }
+        expectBeginLogEvent = false;
+      }
+
+      switch (eventType) {
+        case BigInt(RtcEventType.BeginV3Log):
+          RtcEventBeginLog.parse(eventFields, batched, this.startLogEventsValue);
+          break;
+        case BigInt(RtcEventType.EndV3Log):
+          RtcEventEndLog.parse(eventFields, batched, this.stopLogEventsValue);
+          expectBeginLogEvent = true;
+          break;
+        case BigInt(RtcEventType.AlrStateEvent):
+          RtcEventAlrState.parse(eventFields, batched, this.alrStateEventsValue);
+          break;
+        case BigInt(RtcEventType.AudioPlayout):
+          RtcEventAudioPlayout.parse(eventFields, batched, this.audioPlayoutEventsValue);
+          break;
+        case BigInt(RtcEventType.BweUpdateDelayBased):
+          RtcEventBweUpdateDelayBased.parse(eventFields, batched, this.bweDelayUpdatesValue);
+          break;
+        // AudioNetworkAdaptation, Audio/Video Receive/Send StreamConfig,
+        // BweUpdateLossBased, DtlsTransportState, DtlsWritableState,
+        // FrameDecoded, IceCandidatePairConfig/Event, ProbeClusterCreated,
+        // ProbeResultFailure/Success, RemoteEstimate, RouteChange and
+        // Rtp/RtcpPacketIncoming/Outgoing: their v3 Parse returns
+        // "Not Implemented" upstream without touching the output.
+        default:
+          break;
+      }
+    }
+
+    return ParseStatus.success();
+  }
+
   private parseStreamInternal(s: Uint8Array): ParseStatus {
     const kMaxEventSize = 10000000n; // Sanity check.
     // Protobuf defines the message tag as
@@ -2067,8 +2136,8 @@ export class ParsedRtcEventLog {
       return ParseStatus.error("Failed to read field tag varint");
     }
 
-    if (peek.value >> 1n === kBeginV3LogType) {
-      return ParseStatus.error("The v3 event log format is not supported");
+    if (peek.value >> 1n === BigInt(RtcEventType.BeginV3Log)) {
+      return this.parseStreamInternalV3(s);
     }
 
     while (s.length !== 0) {

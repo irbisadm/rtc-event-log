@@ -3,6 +3,8 @@
 // ParsedRtcEventLog and dumps what the parser sees as JSON.
 //
 //   golden <seed> <out.rtc> <out.json>
+//   golden legacy <seed> <default-map 0|1> <out.rtc> <out.json>
+//   golden v3 <seed> <out.rtc> <out.json>
 //
 // test/logging/rtc-event-log/golden.test.ts parses out.rtc with the port and
 // compares its dump (golden-dump.ts, same format) with out.json.
@@ -26,6 +28,9 @@
 #include "modules/rtp_rtcp/source/rtp_header_extensions.h"
 #include "modules/rtp_rtcp/source/rtp_packet_to_send.h"
 #include "logging/rtc_event_log/encoder/rtc_event_log_encoder_new_format.h"
+#include "logging/rtc_event_log/encoder/rtc_event_log_encoder_v3.h"
+#include "logging/rtc_event_log/encoder/var_int.h"
+#include "logging/rtc_event_log/events/rtc_event_bwe_update_delay_based.h"
 #include "logging/rtc_event_log/rtc_event_log_parser.h"
 #include "logging/rtc_event_log/rtc_event_log_unittest_helper.h"
 #include "rtc_base/random.h"
@@ -746,6 +751,75 @@ class LegacyWriter {
   }
 };
 
+
+// The v3 format: begin/end log segments with random events. Upstream M154
+// only encodes (and parses) begin/end log, ALR state, audio playout and
+// delay-based BWE updates in v3; the other types encode to nothing. Even
+// seeds also get hand-made events the parser has to cope with: unknown and
+// unimplemented event types (ignored), a delay-based update with an invalid
+// detector state and truncated ALR and audio playout batches (all leave
+// default-constructed events behind).
+std::string GenerateV3(uint64_t seed) {
+  SimulatedClock clock(Timestamp::Millis(2'000'000 + 1000 * seed));
+  test::EventGenerator gen(seed, &clock);
+  Random prng(seed * 13 + 5);
+  RtcEventLogEncoderV3 encoder;
+  std::string encoded;
+
+  const uint32_t kAudioIn = 0x1000 + prng.Rand(0, 1000);
+  const int segments = 1 + prng.Rand(0, 2);
+  for (int segment = 0; segment < segments; ++segment) {
+    encoded += encoder.EncodeLogStart(clock.TimeInMicroseconds(),
+                                      clock.TimeInMicroseconds() + 1'600'000'000'000'000 + prng.Rand(0, 999));
+    std::deque<std::unique_ptr<RtcEvent>> history;
+    const int kNumEvents = 200 + prng.Rand(0, 200);
+    const int kBatchSize = 1 + prng.Rand(0, 60);
+    for (int i = 0; i < kNumEvents; ++i) {
+      // Sub-millisecond steps too: v3 stores millisecond timestamps.
+      clock.AdvanceTime(TimeDelta::Micros(prng.Rand(0, 20'000)));
+      switch (prng.Rand(0, 11)) {
+        case 0: case 1: history.push_back(gen.NewAlrState()); break;
+        case 2: case 3: case 4:
+          history.push_back(gen.NewAudioPlayout(kAudioIn + prng.Rand(0, 2)));
+          break;
+        case 5: case 6: case 7: case 8: history.push_back(gen.NewBweUpdateDelayBased()); break;
+        case 9: history.push_back(gen.NewProbeClusterCreated()); break;
+        case 10: history.push_back(gen.NewRtcpPacketIncoming()); break;
+        default: history.push_back(gen.NewRouteChange()); break;
+      }
+      if (history.size() >= static_cast<size_t>(kBatchSize)) {
+        encoded += encoder.EncodeBatch(history.begin(), history.end());
+        history.clear();
+      }
+    }
+    encoded += encoder.EncodeBatch(history.begin(), history.end());
+
+    if (seed % 2 == 0) {
+      auto raw = [&](uint64_t type, bool batched, const std::string& fields) {
+        encoded += EncodeVarInt((type << 1) + (batched ? 1 : 0));
+        encoded += EncodeVarInt(fields.size());
+        encoded += fields;
+      };
+      raw(100, false, "ab");  // Unknown type.
+      raw(static_cast<uint64_t>(RtcEvent::Type::RtpPacketIncoming), true, "xyz");  // Not implemented.
+      clock.AdvanceTime(TimeDelta::Millis(3));
+      RtcEventBweUpdateDelayBased bad(123456, static_cast<BandwidthUsage>(5));
+      bad.SetTimestamp(clock.CurrentTime());
+      std::vector<const RtcEvent*> batch = {&bad};
+      encoded += RtcEventBweUpdateDelayBased::Encode(batch);
+      raw(static_cast<uint64_t>(RtcEvent::Type::AlrStateEvent), true, EncodeVarInt(3));  // No fields.
+      raw(static_cast<uint64_t>(RtcEvent::Type::AudioPlayout), true, EncodeVarInt(2));  // No fields.
+    }
+
+    clock.AdvanceTime(TimeDelta::Millis(5));
+    if (segment + 1 < segments || prng.Rand<bool>()) {
+      encoded += encoder.EncodeLogEnd(clock.TimeInMicroseconds());
+    }
+    clock.AdvanceTime(TimeDelta::Millis(prng.Rand(1, 1000)));
+  }
+  return encoded;
+}
+
 }  // namespace
 }  // namespace webrtc
 
@@ -769,8 +843,20 @@ int main(int argc, char** argv) {
     std::ofstream(argv[5]) << Dump(parsed) << "\n";
     return 0;
   }
+  if (argc == 5 && std::string(argv[1]) == "v3") {
+    const std::string encoded = GenerateV3(std::strtoull(argv[2], nullptr, 10));
+    ParsedRtcEventLog parsed;
+    auto status = parsed.ParseString(encoded);
+    if (!status.ok()) {
+      fprintf(stderr, "parse failed: %s\n", status.message().c_str());
+      return 1;
+    }
+    std::ofstream(argv[3], std::ios::binary) << encoded;
+    std::ofstream(argv[4]) << Dump(parsed) << "\n";
+    return 0;
+  }
   if (argc != 4) {
-    fprintf(stderr, "usage: golden <seed> <out.rtc> <out.json>\n       golden legacy <seed> <default-map 0|1> <out.rtc> <out.json>\n");
+    fprintf(stderr, "usage: golden <seed> <out.rtc> <out.json>\n       golden legacy <seed> <default-map 0|1> <out.rtc> <out.json>\n       golden v3 <seed> <out.rtc> <out.json>\n");
     return 2;
   }
   const uint64_t seed = std::strtoull(argv[1], nullptr, 10);

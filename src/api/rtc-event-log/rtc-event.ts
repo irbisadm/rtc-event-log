@@ -1,0 +1,32 @@
+// Port of api/rtc_event_log/rtc_event.h @ M154 (the RtcEvent::Type enum).
+
+export enum RtcEventType {
+  AlrStateEvent,
+  RouteChangeEvent,
+  RemoteEstimateEvent,
+  AudioNetworkAdaptation,
+  AudioPlayout,
+  AudioReceiveStreamConfig,
+  AudioSendStreamConfig,
+  BweUpdateDelayBased,
+  BweUpdateLossBased,
+  BweUpdateScream,
+  DtlsTransportState,
+  DtlsWritableState,
+  IceCandidatePairConfig,
+  IceCandidatePairEvent,
+  ProbeClusterCreated,
+  ProbeResultFailure,
+  ProbeResultSuccess,
+  RtcpPacketIncoming,
+  RtcpPacketOutgoing,
+  RtpPacketIncoming,
+  RtpPacketOutgoing,
+  VideoReceiveStreamConfig,
+  VideoSendStreamConfig,
+  FrameDecoded,
+  NetEqSetMinimumDelay,
+  BeginV3Log = 0x2501580,
+  EndV3Log = 0x2501581,
+  FakeEvent, // For unit testing.
+}
