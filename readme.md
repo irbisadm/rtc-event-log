@@ -2,7 +2,7 @@
 
 A parser for WebRTC **RtcEventLog** files (the logs Chrome writes from `chrome://webrtc-internals` and native libwebrtc clients produce via `RtcEventLog`) for JavaScript and TypeScript, ported from libwebrtc's `logging/rtc_event_log`.
 
-Status: **work in progress** — the protobuf layer of the new log format decodes and the field encodings (varint, blob and delta encoding) are ported byte-exact; `ParsedRtcEventLog` parses RTP/RTCP packets and begin/end log events, other event types are being ported (see [PORTING_PLAN.md](PORTING_PLAN.md)).
+Status: **work in progress** — the protobuf layer of the new log format decodes and the field encodings (varint, blob and delta encoding) are ported byte-exact; `ParsedRtcEventLog` parses RTP/RTCP packets, begin/end log and BWE events (delay/loss-based, Scream, probes, ALR, route changes, remote estimates); the remaining event types are being ported (see [PORTING_PLAN.md](PORTING_PLAN.md)).
 
 ## Upstream revision
 
@@ -22,7 +22,7 @@ for (const stream of log.outgoingRtpPacketsBySsrc()) {
 }
 ```
 
-The API mirrors upstream `ParsedRtcEventLog` in camelCase. Times are `Timestamp`s: microseconds as a `number` (±`Infinity` for upstream's infinities). `decodeEventStream()` exposes the raw protobuf layer.
+The API mirrors upstream `ParsedRtcEventLog` in camelCase. Times are `Timestamp`s: microseconds as a `number` (±`Infinity` for upstream's infinities); `TimeDelta` is microseconds, `DataRate` bits per second and `DataSize` bytes. `decodeEventStream()` exposes the raw protobuf layer.
 
 ## Development
 

@@ -167,3 +167,31 @@ export function beginLog(timestampMs: number, utcTimeMs: number): Uint8Array {
 export function endLog(timestampMs: number): Uint8Array {
   return eventStreamBytes({endLogEvents: [{timestampMs: BigInt(timestampMs)}]});
 }
+
+// A batched event type: `fields` maps proto field names (without the
+// "Deltas" suffix) to per-event values; undefined = field absent. Mirrors the
+// encoder: the first event is the base, the others delta encoded against it,
+// with signed fields (timestamps) going through ToUnsigned.
+export function batchInit(
+  timestampsMs: readonly number[],
+  fields: Record<string, readonly (number | boolean | undefined)[]>,
+): Record<string, unknown> {
+  const init: Record<string, unknown> = {timestampMs: BigInt(timestampsMs[0])};
+  const asU64 = (v: number | boolean | undefined): OptionalU64 =>
+    v === undefined ? undefined : typeof v === "boolean" ? (v ? 1n : 0n) : BigInt(v);
+  for (const [name, values] of Object.entries(fields)) {
+    if (values[0] !== undefined) init[name] = values[0];
+  }
+  if (timestampsMs.length === 1) return init;
+  init.numberOfDeltas = timestampsMs.length - 1;
+  const ts = encodeDeltas(
+    toUnsigned(BigInt(timestampsMs[0]), 64),
+    timestampsMs.slice(1).map((t) => toUnsigned(BigInt(t), 64)),
+  );
+  if (ts.length !== 0) init.timestampMsDeltas = ts;
+  for (const [name, values] of Object.entries(fields)) {
+    const encoded = encodeDeltas(asU64(values[0]), values.slice(1).map(asU64));
+    if (encoded.length !== 0) init[`${name}Deltas`] = encoded;
+  }
+  return init;
+}

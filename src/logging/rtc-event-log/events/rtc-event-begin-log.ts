@@ -1,21 +1,14 @@
 // Port of logging/rtc_event_log/events/rtc_event_begin_log.h @ M154 (LoggedStartEvent).
 
 import {Timestamp} from "../../../api/units/timestamp.js";
+import {LoggedEvent} from "./logged-event.js";
 
-export class LoggedStartEvent {
-  constructor(
-    public timestamp: Timestamp = Timestamp.plusInfinity(),
-    public utcStartTime: Timestamp = timestamp,
-  ) {}
+export class LoggedStartEvent extends LoggedEvent {
+  utcStartTime: Timestamp;
 
-  logTimeUs(): number {
-    return Timestamp.us(this.timestamp);
-  }
-  logTimeMs(): number {
-    return Timestamp.ms(this.timestamp);
-  }
-  logTime(): Timestamp {
-    return this.timestamp;
+  constructor(timestamp: Timestamp = Timestamp.plusInfinity(), utcStartTime: Timestamp = timestamp) {
+    super(timestamp);
+    this.utcStartTime = utcStartTime;
   }
 
   utcTime(): Timestamp {

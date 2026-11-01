@@ -7,14 +7,36 @@
 import {fromBinary} from "@bufbuild/protobuf";
 
 import {AudioLevel, RTPHeader} from "../../api/rtp-headers.js";
+import {BandwidthUsage} from "../../api/transport/bandwidth-usage.js";
+import {DataRate} from "../../api/units/data-rate.js";
 import {Timestamp} from "../../api/units/timestamp.js";
 import {
+  type AlrState,
+  AlrStateSchema,
   type BeginLogEvent,
   BeginLogEventSchema,
+  type BweProbeCluster,
+  BweProbeClusterSchema,
+  type BweProbeResultFailure,
+  BweProbeResultFailure_FailureReason,
+  BweProbeResultFailureSchema,
+  type BweProbeResultSuccess,
+  BweProbeResultSuccessSchema,
+  type DelayBasedBweUpdates,
+  DelayBasedBweUpdates_DetectorState,
+  DelayBasedBweUpdatesSchema,
   type EndLogEvent,
   EndLogEventSchema,
   type EventStream,
   EventStreamSchema,
+  type LossBasedBweUpdates,
+  LossBasedBweUpdatesSchema,
+  type RemoteEstimates,
+  RemoteEstimatesSchema,
+  type RouteChange,
+  RouteChangeSchema,
+  type ScreamBweUpdates,
+  ScreamBweUpdatesSchema,
   type IncomingRtcpPackets,
   IncomingRtcpPacketsSchema,
   type IncomingRtpPackets,
@@ -38,8 +60,17 @@ import {
   LoggedRtpPacketIncoming,
   LoggedRtpPacketOutgoing,
 } from "./events/logged-rtp-rtcp.js";
+import {LoggedAlrStateEvent} from "./events/rtc-event-alr-state.js";
 import {LoggedStartEvent} from "./events/rtc-event-begin-log.js";
+import {LoggedBweDelayBasedUpdate} from "./events/rtc-event-bwe-update-delay-based.js";
+import {LoggedBweLossBasedUpdate} from "./events/rtc-event-bwe-update-loss-based.js";
+import {LoggedBweScreamUpdate} from "./events/rtc-event-bwe-update-scream.js";
 import {LoggedStopEvent} from "./events/rtc-event-end-log.js";
+import {LoggedBweProbeClusterCreatedEvent} from "./events/rtc-event-probe-cluster-created.js";
+import {LoggedBweProbeFailureEvent, ProbeFailureReason} from "./events/rtc-event-probe-result-failure.js";
+import {LoggedBweProbeSuccessEvent} from "./events/rtc-event-probe-result-success.js";
+import {LoggedRemoteEstimateEvent} from "./events/rtc-event-remote-estimate.js";
+import {LoggedRouteChangeEvent} from "./events/rtc-event-route-change.js";
 import {RtcEventLogParseStatus} from "./events/rtc-event-log-parse-status.js";
 
 export type ParseStatus = RtcEventLogParseStatus;
@@ -139,6 +170,63 @@ function identicalRtcpContents(lastRtcp: Uint8Array, newRtcp: Uint8Array): boole
 
 function check(condition: boolean, message: string): ParseStatus | null {
   return condition ? null : ParseStatus.error(message);
+}
+
+// DecodeDeltas + RTC_PARSE_CHECK_OR_RETURN_EQ(values.size(), number_of_deltas).
+function decodeField(name: string, deltas: Uint8Array, base: OptionalU64, numberOfDeltas: number): OptionalU64[] | ParseStatus {
+  const values = decodeDeltas(deltas, base, numberOfDeltas);
+  if (values.length !== numberOfDeltas) {
+    return ParseStatus.error(`${name}_values.size()==number_of_deltas`);
+  }
+  return values;
+}
+
+// RTC_PARSE_CHECK_OR_RETURN(values[i].has_value()) and, for timestamps,
+// ToSigned<int64_t>.
+function deltaTimestampMs(values: OptionalU64[], i: number): bigint | ParseStatus {
+  const value = values[i];
+  if (value === undefined) return ParseStatus.error("timestamp_ms_values[i].has_value()");
+  const timestampMs = toSigned(value, 64);
+  if (timestampMs === undefined) return ParseStatus.error("ToSigned(timestamp_ms_values[i].value(), &timestamp_ms)");
+  return timestampMs;
+}
+
+// has_value() and RTC_PARSE_CHECK_OR_RETURN_LE(value, uint32 max).
+function deltaU32(name: string, values: OptionalU64[], i: number): number | ParseStatus {
+  const value = values[i];
+  if (value === undefined) return ParseStatus.error(`${name}_values[i].has_value()`);
+  if (value > kU32Max) return ParseStatus.error(`${name}_values[i].value()<=std::numeric_limits<uint32_t>::max()`);
+  return Number(value);
+}
+
+const asInt32 = (v: number): number => v | 0;
+
+export function getRuntimeDetectorState(detectorState: DelayBasedBweUpdates_DetectorState): BandwidthUsage {
+  switch (detectorState) {
+    case DelayBasedBweUpdates_DetectorState.BWE_NORMAL:
+      return BandwidthUsage.kBwNormal;
+    case DelayBasedBweUpdates_DetectorState.BWE_UNDERUSING:
+      return BandwidthUsage.kBwUnderusing;
+    case DelayBasedBweUpdates_DetectorState.BWE_OVERUSING:
+      return BandwidthUsage.kBwOverusing;
+    default:
+      // BWE_UNKNOWN_STATE (RTC_DCHECK_NOTREACHED in upstream).
+      return BandwidthUsage.kBwNormal;
+  }
+}
+
+export function getRuntimeProbeFailureReason(failure: BweProbeResultFailure_FailureReason): ProbeFailureReason {
+  switch (failure) {
+    case BweProbeResultFailure_FailureReason.INVALID_SEND_RECEIVE_INTERVAL:
+      return ProbeFailureReason.kInvalidSendReceiveInterval;
+    case BweProbeResultFailure_FailureReason.INVALID_SEND_RECEIVE_RATIO:
+      return ProbeFailureReason.kInvalidSendReceiveRatio;
+    case BweProbeResultFailure_FailureReason.TIMEOUT:
+      return ProbeFailureReason.kTimeout;
+    default:
+      // UNKNOWN (RTC_DCHECK_NOTREACHED in upstream).
+      return ProbeFailureReason.kTimeout;
+  }
 }
 
 type RtpPacketsProto = IncomingRtpPackets | OutgoingRtpPackets;
@@ -552,6 +640,16 @@ export class ParsedRtcEventLog {
   private startLogEventsValue: LoggedStartEvent[] = [];
   private stopLogEventsValue: LoggedStopEvent[] = [];
 
+  private alrStateEventsValue: LoggedAlrStateEvent[] = [];
+  private routeChangeEventsValue: LoggedRouteChangeEvent[] = [];
+  private remoteEstimateEventsValue: LoggedRemoteEstimateEvent[] = [];
+  private bweProbeClusterCreatedEventsValue: LoggedBweProbeClusterCreatedEvent[] = [];
+  private bweProbeFailureEventsValue: LoggedBweProbeFailureEvent[] = [];
+  private bweProbeSuccessEventsValue: LoggedBweProbeSuccessEvent[] = [];
+  private bweDelayUpdatesValue: LoggedBweDelayBasedUpdate[] = [];
+  private bweLossUpdatesValue: LoggedBweLossBasedUpdate[] = [];
+  private bweScreamUpdatesValue: LoggedBweScreamUpdate[] = [];
+
   private firstTimestampValue: Timestamp = Timestamp.plusInfinity();
   private lastTimestampValue: Timestamp = Timestamp.minusInfinity();
   private firstLogSegmentValue = new LogSegment(0, kInt64Max);
@@ -580,6 +678,17 @@ export class ParsedRtcEventLog {
 
     this.startLogEventsValue = [];
     this.stopLogEventsValue = [];
+    this.bweProbeClusterCreatedEventsValue = [];
+    this.bweProbeFailureEventsValue = [];
+    this.bweProbeSuccessEventsValue = [];
+    this.bweDelayUpdatesValue = [];
+    this.bweLossUpdatesValue = [];
+    this.bweScreamUpdatesValue = [];
+    this.alrStateEventsValue = [];
+    // Not cleared by upstream Clear() either; reset here so that a reused
+    // parser does not accumulate them.
+    this.routeChangeEventsValue = [];
+    this.remoteEstimateEventsValue = [];
 
     this.firstTimestampValue = Timestamp.plusInfinity();
     this.lastTimestampValue = Timestamp.minusInfinity();
@@ -640,6 +749,14 @@ export class ParsedRtcEventLog {
     // timestamp in the parser. It seems like this could be done by the caller.
     this.firstTimestampValue = Timestamp.plusInfinity();
     this.lastTimestampValue = Timestamp.minusInfinity();
+    this.storeFirstAndLastTimestamp(this.alrStateEventsValue);
+    this.storeFirstAndLastTimestamp(this.routeChangeEventsValue);
+    this.storeFirstAndLastTimestamp(this.bweProbeClusterCreatedEventsValue);
+    this.storeFirstAndLastTimestamp(this.bweProbeFailureEventsValue);
+    this.storeFirstAndLastTimestamp(this.bweProbeSuccessEventsValue);
+    this.storeFirstAndLastTimestamp(this.bweDelayUpdatesValue);
+    this.storeFirstAndLastTimestamp(this.bweLossUpdatesValue);
+    this.storeFirstAndLastTimestamp(this.bweScreamUpdatesValue);
     for (const rtpStream of this.incomingRtpPacketsBySsrcValue) {
       this.storeFirstAndLastTimestamp(rtpStream.incomingPackets);
     }
@@ -648,6 +765,7 @@ export class ParsedRtcEventLog {
     }
     this.storeFirstAndLastTimestamp(this.incomingRtcpPacketsValue);
     this.storeFirstAndLastTimestamp(this.outgoingRtcpPacketsValue);
+    this.storeFirstAndLastTimestamp(this.remoteEstimateEventsValue);
 
     // Stop events could be missing due to file size limits. If so, use the
     // last event, or the next start timestamp if available.
@@ -685,6 +803,42 @@ export class ParsedRtcEventLog {
 
   stopLogEvents(): readonly LoggedStopEvent[] {
     return this.stopLogEventsValue;
+  }
+
+  alrStateEvents(): readonly LoggedAlrStateEvent[] {
+    return this.alrStateEventsValue;
+  }
+
+  bweProbeClusterCreatedEvents(): readonly LoggedBweProbeClusterCreatedEvent[] {
+    return this.bweProbeClusterCreatedEventsValue;
+  }
+
+  bweProbeFailureEvents(): readonly LoggedBweProbeFailureEvent[] {
+    return this.bweProbeFailureEventsValue;
+  }
+
+  bweProbeSuccessEvents(): readonly LoggedBweProbeSuccessEvent[] {
+    return this.bweProbeSuccessEventsValue;
+  }
+
+  bweDelayUpdates(): readonly LoggedBweDelayBasedUpdate[] {
+    return this.bweDelayUpdatesValue;
+  }
+
+  bweLossUpdates(): readonly LoggedBweLossBasedUpdate[] {
+    return this.bweLossUpdatesValue;
+  }
+
+  bweScreamUpdates(): readonly LoggedBweScreamUpdate[] {
+    return this.bweScreamUpdatesValue;
+  }
+
+  routeChangeEvents(): readonly LoggedRouteChangeEvent[] {
+    return this.routeChangeEventsValue;
+  }
+
+  remoteEstimateEvents(): readonly LoggedRemoteEstimateEvent[] {
+    return this.remoteEstimateEventsValue;
   }
 
   // RTP
@@ -829,6 +983,24 @@ export class ParsedRtcEventLog {
       return this.storeStartEvent(stream.beginLogEvents[0]);
     } else if (stream.endLogEvents.length === 1) {
       return this.storeStopEvent(stream.endLogEvents[0]);
+    } else if (stream.lossBasedBweUpdates.length === 1) {
+      return this.storeBweLossBasedUpdate(stream.lossBasedBweUpdates[0]);
+    } else if (stream.delayBasedBweUpdates.length === 1) {
+      return this.storeBweDelayBasedUpdate(stream.delayBasedBweUpdates[0]);
+    } else if (stream.screamBweUpdates.length === 1) {
+      return this.storeBweScreamUpdate(stream.screamBweUpdates[0]);
+    } else if (stream.probeClusters.length === 1) {
+      return this.storeBweProbeClusterCreated(stream.probeClusters[0]);
+    } else if (stream.probeSuccess.length === 1) {
+      return this.storeBweProbeSuccessEvent(stream.probeSuccess[0]);
+    } else if (stream.probeFailure.length === 1) {
+      return this.storeBweProbeFailureEvent(stream.probeFailure[0]);
+    } else if (stream.alrStates.length === 1) {
+      return this.storeAlrStateEvent(stream.alrStates[0]);
+    } else if (stream.routeChanges.length === 1) {
+      return this.storeRouteChangeEvent(stream.routeChanges[0]);
+    } else if (stream.remoteEstimates.length === 1) {
+      return this.storeRemoteEstimateEvent(stream.remoteEstimates[0]);
     } else {
       // TODO(stages 3-4): the remaining event types are not ported yet.
       return ParseStatus.success();
@@ -880,6 +1052,293 @@ export class ParsedRtcEventLog {
     const stopEvent = new LoggedStopEvent(Timestamp.millis(proto.timestampMs));
 
     this.stopLogEventsValue.push(stopEvent);
+    return ParseStatus.success();
+  }
+
+  private storeAlrStateEvent(proto: AlrState): ParseStatus {
+    if (!has(AlrStateSchema, proto, "timestampMs")) return ParseStatus.error("proto.has_timestamp_ms()");
+    if (!has(AlrStateSchema, proto, "inAlr")) return ParseStatus.error("proto.has_in_alr()");
+    const alrEvent = new LoggedAlrStateEvent(Timestamp.millis(proto.timestampMs), proto.inAlr);
+    this.alrStateEventsValue.push(alrEvent);
+    // TODO(terelius): Should we delta encode this event type?
+    return ParseStatus.success();
+  }
+
+  private storeRouteChangeEvent(proto: RouteChange): ParseStatus {
+    const S = RouteChangeSchema;
+    if (!has(S, proto, "timestampMs")) return ParseStatus.error("proto.has_timestamp_ms()");
+    if (!has(S, proto, "connected")) return ParseStatus.error("proto.has_connected()");
+    if (!has(S, proto, "overhead")) return ParseStatus.error("proto.has_overhead()");
+    const routeEvent = new LoggedRouteChangeEvent(Timestamp.millis(proto.timestampMs), proto.connected, proto.overhead);
+    this.routeChangeEventsValue.push(routeEvent);
+    // TODO(terelius): Should we delta encode this event type?
+    return ParseStatus.success();
+  }
+
+  private storeRemoteEstimateEvent(proto: RemoteEstimates): ParseStatus {
+    const S = RemoteEstimatesSchema;
+    if (!has(S, proto, "timestampMs")) return ParseStatus.error("proto.has_timestamp_ms()");
+    // Base event
+    const baseEvent = new LoggedRemoteEstimateEvent(Timestamp.millis(proto.timestampMs));
+    let baseLinkCapacityLowerKbps: OptionalU64;
+    if (has(S, proto, "linkCapacityLowerKbps")) {
+      baseLinkCapacityLowerKbps = BigInt(proto.linkCapacityLowerKbps);
+      baseEvent.linkCapacityLower = DataRate.kilobitsPerSec(proto.linkCapacityLowerKbps);
+    }
+    let baseLinkCapacityUpperKbps: OptionalU64;
+    if (has(S, proto, "linkCapacityUpperKbps")) {
+      baseLinkCapacityUpperKbps = BigInt(proto.linkCapacityUpperKbps);
+      baseEvent.linkCapacityUpper = DataRate.kilobitsPerSec(proto.linkCapacityUpperKbps);
+    }
+    this.remoteEstimateEventsValue.push(baseEvent);
+
+    const numberOfDeltas = has(S, proto, "numberOfDeltas") ? proto.numberOfDeltas : 0;
+    if (numberOfDeltas === 0) {
+      return ParseStatus.success();
+    }
+
+    // timestamp_ms
+    const timestampMsValues = decodeField("timestamp_ms", proto.timestampMsDeltas, toUnsigned(proto.timestampMs, 64), numberOfDeltas);
+    if (timestampMsValues instanceof RtcEventLogParseStatus) return timestampMsValues;
+    // link_capacity_lower_kbps
+    const lowerValues = decodeField("link_capacity_lower_kbps", proto.linkCapacityLowerKbpsDeltas, baseLinkCapacityLowerKbps, numberOfDeltas);
+    if (lowerValues instanceof RtcEventLogParseStatus) return lowerValues;
+    // link_capacity_upper_kbps
+    const upperValues = decodeField("link_capacity_upper_kbps", proto.linkCapacityUpperKbpsDeltas, baseLinkCapacityUpperKbps, numberOfDeltas);
+    if (upperValues instanceof RtcEventLogParseStatus) return upperValues;
+
+    // Populate events from decoded deltas
+    for (let i = 0; i < numberOfDeltas; ++i) {
+      const timestampMs = timestampMsValues[i];
+      if (timestampMs === undefined) return ParseStatus.error("timestamp_ms_values[i].has_value()");
+      // Upstream converts the uint64 to int64 implicitly here (no ToSigned).
+      const event = new LoggedRemoteEstimateEvent(Timestamp.millis(BigInt.asIntN(64, timestampMs)));
+      const lower = lowerValues[i];
+      if (lower !== undefined) event.linkCapacityLower = DataRate.kilobitsPerSec(lower);
+      const upper = upperValues[i];
+      if (upper !== undefined) event.linkCapacityUpper = DataRate.kilobitsPerSec(upper);
+      this.remoteEstimateEventsValue.push(event);
+    }
+    return ParseStatus.success();
+  }
+
+  private storeBweLossBasedUpdate(proto: LossBasedBweUpdates): ParseStatus {
+    const S = LossBasedBweUpdatesSchema;
+    if (!has(S, proto, "timestampMs")) return ParseStatus.error("proto.has_timestamp_ms()");
+    if (!has(S, proto, "bitrateBps")) return ParseStatus.error("proto.has_bitrate_bps()");
+    if (!has(S, proto, "fractionLoss")) return ParseStatus.error("proto.has_fraction_loss()");
+    if (!has(S, proto, "totalPackets")) return ParseStatus.error("proto.has_total_packets()");
+
+    // Base event (the uint32 proto values narrow to the struct's int32/uint8).
+    this.bweLossUpdatesValue.push(
+      new LoggedBweLossBasedUpdate(
+        Timestamp.millis(proto.timestampMs),
+        asInt32(proto.bitrateBps),
+        proto.fractionLoss & 0xff,
+        asInt32(proto.totalPackets),
+      ),
+    );
+
+    const numberOfDeltas = has(S, proto, "numberOfDeltas") ? proto.numberOfDeltas : 0;
+    if (numberOfDeltas === 0) {
+      return ParseStatus.success();
+    }
+
+    const timestampMsValues = decodeField("timestamp_ms", proto.timestampMsDeltas, toUnsigned(proto.timestampMs, 64), numberOfDeltas);
+    if (timestampMsValues instanceof RtcEventLogParseStatus) return timestampMsValues;
+    const bitrateBpsValues = decodeField("bitrate_bps", proto.bitrateBpsDeltas, BigInt(proto.bitrateBps), numberOfDeltas);
+    if (bitrateBpsValues instanceof RtcEventLogParseStatus) return bitrateBpsValues;
+    const fractionLossValues = decodeField("fraction_loss", proto.fractionLossDeltas, BigInt(proto.fractionLoss), numberOfDeltas);
+    if (fractionLossValues instanceof RtcEventLogParseStatus) return fractionLossValues;
+    const totalPacketsValues = decodeField("total_packets", proto.totalPacketsDeltas, BigInt(proto.totalPackets), numberOfDeltas);
+    if (totalPacketsValues instanceof RtcEventLogParseStatus) return totalPacketsValues;
+
+    // Populate events from decoded deltas
+    for (let i = 0; i < numberOfDeltas; ++i) {
+      const timestampMs = deltaTimestampMs(timestampMsValues, i);
+      if (timestampMs instanceof RtcEventLogParseStatus) return timestampMs;
+      const bitrateBps = deltaU32("bitrate_bps", bitrateBpsValues, i);
+      if (bitrateBps instanceof RtcEventLogParseStatus) return bitrateBps;
+      const fractionLoss = deltaU32("fraction_loss", fractionLossValues, i);
+      if (fractionLoss instanceof RtcEventLogParseStatus) return fractionLoss;
+      const totalPackets = deltaU32("total_packets", totalPacketsValues, i);
+      if (totalPackets instanceof RtcEventLogParseStatus) return totalPackets;
+      this.bweLossUpdatesValue.push(
+        new LoggedBweLossBasedUpdate(Timestamp.millis(timestampMs), asInt32(bitrateBps), fractionLoss & 0xff, asInt32(totalPackets)),
+      );
+    }
+    return ParseStatus.success();
+  }
+
+  private storeBweDelayBasedUpdate(proto: DelayBasedBweUpdates): ParseStatus {
+    const S = DelayBasedBweUpdatesSchema;
+    if (!has(S, proto, "timestampMs")) return ParseStatus.error("proto.has_timestamp_ms()");
+    if (!has(S, proto, "bitrateBps")) return ParseStatus.error("proto.has_bitrate_bps()");
+    if (!has(S, proto, "detectorState")) return ParseStatus.error("proto.has_detector_state()");
+
+    // Base event
+    const baseDetectorState = getRuntimeDetectorState(proto.detectorState);
+    this.bweDelayUpdatesValue.push(
+      new LoggedBweDelayBasedUpdate(Timestamp.millis(proto.timestampMs), asInt32(proto.bitrateBps), baseDetectorState),
+    );
+
+    const numberOfDeltas = has(S, proto, "numberOfDeltas") ? proto.numberOfDeltas : 0;
+    if (numberOfDeltas === 0) {
+      return ParseStatus.success();
+    }
+
+    const timestampMsValues = decodeField("timestamp_ms", proto.timestampMsDeltas, toUnsigned(proto.timestampMs, 64), numberOfDeltas);
+    if (timestampMsValues instanceof RtcEventLogParseStatus) return timestampMsValues;
+    const bitrateBpsValues = decodeField("bitrate_bps", proto.bitrateBpsDeltas, BigInt(proto.bitrateBps), numberOfDeltas);
+    if (bitrateBpsValues instanceof RtcEventLogParseStatus) return bitrateBpsValues;
+    const detectorStateValues = decodeField(
+      "detector_state",
+      proto.detectorStateDeltas,
+      BigInt.asUintN(64, BigInt(proto.detectorState)),
+      numberOfDeltas,
+    );
+    if (detectorStateValues instanceof RtcEventLogParseStatus) return detectorStateValues;
+
+    // Populate events from decoded deltas
+    for (let i = 0; i < numberOfDeltas; ++i) {
+      const timestampMs = deltaTimestampMs(timestampMsValues, i);
+      if (timestampMs instanceof RtcEventLogParseStatus) return timestampMs;
+      const bitrateBps = deltaU32("bitrate_bps", bitrateBpsValues, i);
+      if (bitrateBps instanceof RtcEventLogParseStatus) return bitrateBps;
+      const detectorState = detectorStateValues[i];
+      if (detectorState === undefined) return ParseStatus.error("detector_state_values[i].has_value()");
+      this.bweDelayUpdatesValue.push(
+        new LoggedBweDelayBasedUpdate(
+          Timestamp.millis(timestampMs),
+          asInt32(bitrateBps),
+          // static_cast to the proto enum (an int).
+          getRuntimeDetectorState(Number(BigInt.asIntN(32, detectorState)) as DelayBasedBweUpdates_DetectorState),
+        ),
+      );
+    }
+    return ParseStatus.success();
+  }
+
+  private storeBweScreamUpdate(proto: ScreamBweUpdates): ParseStatus {
+    const S = ScreamBweUpdatesSchema;
+    for (const field of [
+      "timestampMs",
+      "refWindowBytes",
+      "dataInFlightBytes",
+      "targetRateKbps",
+      "smoothedRttMs",
+      "avgQueueDelayMs",
+      "l4sMarkedPermille",
+    ] as const) {
+      if (!has(S, proto, field)) return ParseStatus.error(`proto.has_${field}()`);
+    }
+
+    // Base event
+    this.bweScreamUpdatesValue.push(
+      new LoggedBweScreamUpdate(
+        Timestamp.millis(proto.timestampMs),
+        proto.refWindowBytes,
+        proto.dataInFlightBytes,
+        proto.targetRateKbps,
+        proto.smoothedRttMs,
+        proto.avgQueueDelayMs,
+        proto.l4sMarkedPermille,
+      ),
+    );
+
+    const numberOfDeltas = has(S, proto, "numberOfDeltas") ? proto.numberOfDeltas : 0;
+    if (numberOfDeltas === 0) {
+      return ParseStatus.success();
+    }
+
+    const timestampMsValues = decodeField("timestamp_ms", proto.timestampMsDeltas, toUnsigned(proto.timestampMs, 64), numberOfDeltas);
+    if (timestampMsValues instanceof RtcEventLogParseStatus) return timestampMsValues;
+    const fields = [
+      ["ref_window_bytes", proto.refWindowBytesDeltas, proto.refWindowBytes],
+      ["data_in_flight_bytes", proto.dataInFlightBytesDeltas, proto.dataInFlightBytes],
+      ["target_rate_kbps", proto.targetRateKbpsDeltas, proto.targetRateKbps],
+      ["smoothed_rtt_ms", proto.smoothedRttMsDeltas, proto.smoothedRttMs],
+      ["avg_queue_delay_ms", proto.avgQueueDelayMsDeltas, proto.avgQueueDelayMs],
+      ["l4s_marked_permille", proto.l4sMarkedPermilleDeltas, proto.l4sMarkedPermille],
+    ] as const;
+    const decoded: OptionalU64[][] = [];
+    for (const [name, deltas, base] of fields) {
+      const values = decodeField(name, deltas, BigInt(base), numberOfDeltas);
+      if (values instanceof RtcEventLogParseStatus) return values;
+      decoded.push(values);
+    }
+
+    // Populate events from decoded deltas
+    for (let i = 0; i < numberOfDeltas; ++i) {
+      const timestampMs = deltaTimestampMs(timestampMsValues, i);
+      if (timestampMs instanceof RtcEventLogParseStatus) return timestampMs;
+      const values: number[] = [];
+      for (let f = 0; f < fields.length; ++f) {
+        const value = deltaU32(fields[f][0], decoded[f], i);
+        if (value instanceof RtcEventLogParseStatus) return value;
+        values.push(value);
+      }
+      const [refWindowBytes, dataInFlightBytes, targetRateKbps, smoothedRttMs, avgQueueDelayMs, l4sMarkedPermille] = values;
+      this.bweScreamUpdatesValue.push(
+        new LoggedBweScreamUpdate(
+          Timestamp.millis(timestampMs),
+          refWindowBytes,
+          dataInFlightBytes,
+          targetRateKbps,
+          smoothedRttMs,
+          avgQueueDelayMs,
+          l4sMarkedPermille,
+        ),
+      );
+    }
+    return ParseStatus.success();
+  }
+
+  private storeBweProbeClusterCreated(proto: BweProbeCluster): ParseStatus {
+    const S = BweProbeClusterSchema;
+    if (!has(S, proto, "timestampMs")) return ParseStatus.error("proto.has_timestamp_ms()");
+    if (!has(S, proto, "id")) return ParseStatus.error("proto.has_id()");
+    if (!has(S, proto, "bitrateBps")) return ParseStatus.error("proto.has_bitrate_bps()");
+    if (!has(S, proto, "minPackets")) return ParseStatus.error("proto.has_min_packets()");
+    if (!has(S, proto, "minBytes")) return ParseStatus.error("proto.has_min_bytes()");
+    this.bweProbeClusterCreatedEventsValue.push(
+      new LoggedBweProbeClusterCreatedEvent(
+        Timestamp.millis(proto.timestampMs),
+        asInt32(proto.id),
+        asInt32(proto.bitrateBps),
+        proto.minPackets,
+        proto.minBytes,
+      ),
+    );
+    // TODO(terelius): Should we delta encode this event type?
+    return ParseStatus.success();
+  }
+
+  private storeBweProbeSuccessEvent(proto: BweProbeResultSuccess): ParseStatus {
+    const S = BweProbeResultSuccessSchema;
+    if (!has(S, proto, "timestampMs")) return ParseStatus.error("proto.has_timestamp_ms()");
+    if (!has(S, proto, "id")) return ParseStatus.error("proto.has_id()");
+    if (!has(S, proto, "bitrateBps")) return ParseStatus.error("proto.has_bitrate_bps()");
+    this.bweProbeSuccessEventsValue.push(
+      new LoggedBweProbeSuccessEvent(Timestamp.millis(proto.timestampMs), asInt32(proto.id), asInt32(proto.bitrateBps)),
+    );
+    // TODO(terelius): Should we delta encode this event type?
+    return ParseStatus.success();
+  }
+
+  private storeBweProbeFailureEvent(proto: BweProbeResultFailure): ParseStatus {
+    const S = BweProbeResultFailureSchema;
+    if (!has(S, proto, "timestampMs")) return ParseStatus.error("proto.has_timestamp_ms()");
+    if (!has(S, proto, "id")) return ParseStatus.error("proto.has_id()");
+    if (!has(S, proto, "failure")) return ParseStatus.error("proto.has_failure()");
+    this.bweProbeFailureEventsValue.push(
+      new LoggedBweProbeFailureEvent(
+        Timestamp.millis(proto.timestampMs),
+        asInt32(proto.id),
+        getRuntimeProbeFailureReason(proto.failure),
+      ),
+    );
+    // TODO(terelius): Should we delta encode this event type?
     return ParseStatus.success();
   }
 
