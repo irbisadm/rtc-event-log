@@ -12,8 +12,18 @@ export function decodeEventStream(bytes: Uint8Array): EventStream {
 }
 
 export {
+  getRuntimeCodecType,
   getRuntimeDetectorState,
+  getRuntimeDtlsTransportState,
+  getRuntimeIceCandidatePairAddressFamily,
+  getRuntimeIceCandidatePairConfigType,
+  getRuntimeIceCandidatePairEventType,
+  getRuntimeIceCandidatePairProtocol,
+  getRuntimeIceCandidateNetworkType,
+  getRuntimeIceCandidateType,
   getRuntimeProbeFailureReason,
+  getRuntimeRtpHeaderExtensionConfig,
+  InferredRouteChangeEvent,
   LoggedMediaType,
   LoggedRtpStreamIncoming,
   LoggedRtpStreamOutgoing,
@@ -42,7 +52,25 @@ export {
   LoggedBweProbeFailureEvent,
   ProbeFailureReason,
 } from "./logging/rtc-event-log/events/rtc-event-probe-result-failure.js";
+export {LoggedAudioPlayoutEvent} from "./logging/rtc-event-log/events/rtc-event-audio-playout.js";
+export {LoggedNetEqSetMinimumDelayEvent} from "./logging/rtc-event-log/events/rtc-event-neteq-set-minimum-delay.js";
+export {LoggedAudioNetworkAdaptationEvent} from "./logging/rtc-event-log/events/rtc-event-audio-network-adaptation.js";
+export {LoggedDtlsTransportState} from "./logging/rtc-event-log/events/rtc-event-dtls-transport-state.js";
+export {LoggedDtlsWritableState} from "./logging/rtc-event-log/events/rtc-event-dtls-writable-state.js";
+export {LoggedFrameDecoded} from "./logging/rtc-event-log/events/rtc-event-frame-decoded.js";
+export * from "./logging/rtc-event-log/events/rtc-event-ice-candidate-pair-config.js";
+export * from "./logging/rtc-event-log/events/rtc-event-ice-candidate-pair.js";
+export {LoggedAudioRecvConfig} from "./logging/rtc-event-log/events/rtc-event-audio-receive-stream-config.js";
+export {LoggedAudioSendConfig} from "./logging/rtc-event-log/events/rtc-event-audio-send-stream-config.js";
+export {LoggedVideoRecvConfig} from "./logging/rtc-event-log/events/rtc-event-video-receive-stream-config.js";
+export {LoggedVideoSendConfig} from "./logging/rtc-event-log/events/rtc-event-video-send-stream-config.js";
+export {StreamConfig, StreamConfigCodec} from "./logging/rtc-event-log/rtc-stream-config.js";
+export {AudioEncoderRuntimeConfig} from "./modules/audio-coding/audio-network-adaptor/include/audio-network-adaptor-config.js";
 export {BandwidthUsage} from "./api/transport/bandwidth-usage.js";
+export {IceCandidateType} from "./api/candidate.js";
+export {DtlsTransportState} from "./api/dtls-transport-interface.js";
+export {RtpExtension} from "./api/rtp-parameters.js";
+export {VideoCodecType} from "./api/video/video-codec-type.js";
 export {AudioLevel, RTPHeader, RTPHeaderExtension, RtcpMode} from "./api/rtp-headers.js";
 export {VideoRotation} from "./api/video/video-rotation.js";
 export {Timestamp} from "./api/units/timestamp.js";

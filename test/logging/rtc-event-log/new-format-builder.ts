@@ -172,13 +172,20 @@ export function endLog(timestampMs: number): Uint8Array {
 // "Deltas" suffix) to per-event values; undefined = field absent. Mirrors the
 // encoder: the first event is the base, the others delta encoded against it,
 // with signed fields (timestamps) going through ToUnsigned.
+// `signedFields` names the int32/int64 fields, which the encoder delta encodes
+// as ToUnsigned(value).
 export function batchInit(
   timestampsMs: readonly number[],
-  fields: Record<string, readonly (number | boolean | undefined)[]>,
+  fields: Record<string, readonly (number | bigint | boolean | undefined)[]>,
+  signedFields: Record<string, 32 | 64> = {},
 ): Record<string, unknown> {
   const init: Record<string, unknown> = {timestampMs: BigInt(timestampsMs[0])};
-  const asU64 = (v: number | boolean | undefined): OptionalU64 =>
-    v === undefined ? undefined : typeof v === "boolean" ? (v ? 1n : 0n) : BigInt(v);
+  const encodeValue = (name: string, v: number | bigint | boolean | undefined): OptionalU64 => {
+    if (v === undefined) return undefined;
+    if (typeof v === "boolean") return v ? 1n : 0n;
+    const width = signedFields[name];
+    return width === undefined ? BigInt(v) : toUnsigned(BigInt(v), width);
+  };
   for (const [name, values] of Object.entries(fields)) {
     if (values[0] !== undefined) init[name] = values[0];
   }
@@ -190,6 +197,7 @@ export function batchInit(
   );
   if (ts.length !== 0) init.timestampMsDeltas = ts;
   for (const [name, values] of Object.entries(fields)) {
+    const asU64 = (v: number | bigint | boolean | undefined) => encodeValue(name, v);
     const encoded = encodeDeltas(asU64(values[0]), values.slice(1).map(asU64));
     if (encoded.length !== 0) init[`${name}Deltas`] = encoded;
   }

@@ -1,18 +1,57 @@
 // Port of logging/rtc_event_log/rtc_event_log_parser.h @ M154.
 //
-// Status of the port (see PORTING_PLAN.md): the new (protobuf) format with
-// RTP/RTCP packets and begin/end log events. Other event types of the new
-// format are skipped for now; the legacy and v3 formats are rejected.
+// Status of the port (see PORTING_PLAN.md): all event types of the new
+// (protobuf) format. RTCP payloads are kept raw for now; the legacy and v3
+// formats are rejected.
 
 import {fromBinary} from "@bufbuild/protobuf";
 
+import {IceCandidateType} from "../../api/candidate.js";
+import {DtlsTransportState} from "../../api/dtls-transport-interface.js";
 import {AudioLevel, RTPHeader} from "../../api/rtp-headers.js";
+import {RtpExtension} from "../../api/rtp-parameters.js";
+import {VideoCodecType} from "../../api/video/video-codec-type.js";
+import {AudioEncoderRuntimeConfig} from "../../modules/audio-coding/audio-network-adaptor/include/audio-network-adaptor-config.js";
 import {BandwidthUsage} from "../../api/transport/bandwidth-usage.js";
 import {DataRate} from "../../api/units/data-rate.js";
 import {Timestamp} from "../../api/units/timestamp.js";
 import {
   type AlrState,
   AlrStateSchema,
+  type AudioNetworkAdaptations,
+  AudioNetworkAdaptationsSchema,
+  type AudioPlayoutEvents,
+  AudioPlayoutEventsSchema,
+  type AudioRecvStreamConfig,
+  AudioRecvStreamConfigSchema,
+  type AudioSendStreamConfig,
+  AudioSendStreamConfigSchema,
+  type DtlsTransportStateEvent,
+  DtlsTransportStateEvent_DtlsTransportState,
+  DtlsTransportStateEventSchema,
+  type DtlsWritableState,
+  DtlsWritableStateSchema,
+  type FrameDecodedEvents,
+  FrameDecodedEvents_Codec,
+  FrameDecodedEventsSchema,
+  type IceCandidatePairConfig,
+  IceCandidatePairConfig_AddressFamily,
+  IceCandidatePairConfig_IceCandidatePairConfigType,
+  IceCandidatePairConfig_IceCandidateType,
+  IceCandidatePairConfig_NetworkType,
+  IceCandidatePairConfig_Protocol,
+  IceCandidatePairConfigSchema,
+  type IceCandidatePairEvent,
+  IceCandidatePairEvent_IceCandidatePairEventType,
+  IceCandidatePairEventSchema,
+  type NetEqSetMinimumDelay,
+  NetEqSetMinimumDelaySchema,
+  type RtpHeaderExtensionConfig,
+  RtpHeaderExtensionConfigSchema,
+  type VideoRecvStreamConfig,
+  VideoRecvStreamConfigSchema,
+  type VideoSendStreamConfig,
+  VideoSendStreamConfigSchema,
   type BeginLogEvent,
   BeginLogEventSchema,
   type BweProbeCluster,
@@ -51,7 +90,11 @@ import {convertCVOByteToVideoRotation} from "../../modules/rtp-rtcp/include/rtp-
 import {RtcEventLogDependencyDescriptorEncoderDecoder} from "./dependency-descriptor-encoder-decoder.js";
 import {decodeBlobs} from "./encoder/blob-encoding.js";
 import {decodeDeltas, type OptionalU64} from "./encoder/delta-encoding.js";
-import {toSigned, toUnsigned} from "./encoder/rtc-event-log-encoder-common.js";
+import {
+  parsePacketLossFractionFromProtoFormat,
+  toSigned,
+  toUnsigned,
+} from "./encoder/rtc-event-log-encoder-common.js";
 import {decodeVarInt} from "./encoder/var-int.js";
 import {
   LoggedRtcpPacketIncoming,
@@ -61,6 +104,24 @@ import {
   LoggedRtpPacketOutgoing,
 } from "./events/logged-rtp-rtcp.js";
 import {LoggedAlrStateEvent} from "./events/rtc-event-alr-state.js";
+import {LoggedAudioNetworkAdaptationEvent} from "./events/rtc-event-audio-network-adaptation.js";
+import {LoggedAudioPlayoutEvent} from "./events/rtc-event-audio-playout.js";
+import {LoggedAudioRecvConfig} from "./events/rtc-event-audio-receive-stream-config.js";
+import {LoggedAudioSendConfig} from "./events/rtc-event-audio-send-stream-config.js";
+import {LoggedDtlsTransportState} from "./events/rtc-event-dtls-transport-state.js";
+import {LoggedDtlsWritableState} from "./events/rtc-event-dtls-writable-state.js";
+import {LoggedFrameDecoded} from "./events/rtc-event-frame-decoded.js";
+import {
+  IceCandidateNetworkType,
+  IceCandidatePairAddressFamily,
+  IceCandidatePairConfigType,
+  IceCandidatePairProtocol,
+  LoggedIceCandidatePairConfig,
+} from "./events/rtc-event-ice-candidate-pair-config.js";
+import {IceCandidatePairEventType, LoggedIceCandidatePairEvent} from "./events/rtc-event-ice-candidate-pair.js";
+import {LoggedNetEqSetMinimumDelayEvent} from "./events/rtc-event-neteq-set-minimum-delay.js";
+import {LoggedVideoRecvConfig} from "./events/rtc-event-video-receive-stream-config.js";
+import {LoggedVideoSendConfig} from "./events/rtc-event-video-send-stream-config.js";
 import {LoggedStartEvent} from "./events/rtc-event-begin-log.js";
 import {LoggedBweDelayBasedUpdate} from "./events/rtc-event-bwe-update-delay-based.js";
 import {LoggedBweLossBasedUpdate} from "./events/rtc-event-bwe-update-loss-based.js";
@@ -75,6 +136,12 @@ import {RtcEventLogParseStatus} from "./events/rtc-event-log-parse-status.js";
 
 export type ParseStatus = RtcEventLogParseStatus;
 const ParseStatus = RtcEventLogParseStatus;
+
+const kIpv4Overhead = 20;
+const kIpv6Overhead = 40;
+const kUdpOverhead = 8;
+const kSrtpOverhead = 10;
+const kStunOverhead = 4;
 
 const kIncompleteLogError = "Could not parse the entire log. Only the beginning will be used.";
 
@@ -153,6 +220,20 @@ export class LogSegment {
   }
 }
 
+export class InferredRouteChangeEvent {
+  routeId = 0;
+  logTime: Timestamp = Timestamp.minusInfinity();
+  sendOverhead = 0;
+  returnOverhead = 0;
+
+  logTimeMs(): number {
+    return Timestamp.ms(this.logTime);
+  }
+  logTimeUs(): number {
+    return Timestamp.us(this.logTime);
+  }
+}
+
 interface HasLogTime {
   logTime(): Timestamp;
 }
@@ -227,6 +308,181 @@ export function getRuntimeProbeFailureReason(failure: BweProbeResultFailure_Fail
       // UNKNOWN (RTC_DCHECK_NOTREACHED in upstream).
       return ProbeFailureReason.kTimeout;
   }
+}
+
+export function getRuntimeDtlsTransportState(state: DtlsTransportStateEvent_DtlsTransportState): DtlsTransportState {
+  switch (state) {
+    case DtlsTransportStateEvent_DtlsTransportState.DTLS_TRANSPORT_NEW:
+      return DtlsTransportState.kNew;
+    case DtlsTransportStateEvent_DtlsTransportState.DTLS_TRANSPORT_CONNECTING:
+      return DtlsTransportState.kConnecting;
+    case DtlsTransportStateEvent_DtlsTransportState.DTLS_TRANSPORT_CONNECTED:
+      return DtlsTransportState.kConnected;
+    case DtlsTransportStateEvent_DtlsTransportState.DTLS_TRANSPORT_CLOSED:
+      return DtlsTransportState.kClosed;
+    case DtlsTransportStateEvent_DtlsTransportState.DTLS_TRANSPORT_FAILED:
+      return DtlsTransportState.kFailed;
+    default:
+      // UNKNOWN_DTLS_TRANSPORT_STATE (RTC_DCHECK_NOTREACHED in upstream).
+      return DtlsTransportState.kNumValues;
+  }
+}
+
+export function getRuntimeIceCandidatePairConfigType(
+  type: IceCandidatePairConfig_IceCandidatePairConfigType,
+): IceCandidatePairConfigType {
+  switch (type) {
+    case IceCandidatePairConfig_IceCandidatePairConfigType.ADDED:
+      return IceCandidatePairConfigType.kAdded;
+    case IceCandidatePairConfig_IceCandidatePairConfigType.UPDATED:
+      return IceCandidatePairConfigType.kUpdated;
+    case IceCandidatePairConfig_IceCandidatePairConfigType.DESTROYED:
+      return IceCandidatePairConfigType.kDestroyed;
+    case IceCandidatePairConfig_IceCandidatePairConfigType.SELECTED:
+      return IceCandidatePairConfigType.kSelected;
+    default:
+      // UNKNOWN_CONFIG_TYPE (RTC_DCHECK_NOTREACHED in upstream).
+      return IceCandidatePairConfigType.kAdded;
+  }
+}
+
+// The bool-returning overload: undefined for types without a runtime
+// equivalent (the parser rejects those).
+export function getRuntimeIceCandidateType(type: IceCandidatePairConfig_IceCandidateType): IceCandidateType | undefined {
+  switch (type) {
+    case IceCandidatePairConfig_IceCandidateType.LOCAL:
+      return IceCandidateType.kHost;
+    case IceCandidatePairConfig_IceCandidateType.STUN:
+      return IceCandidateType.kSrflx;
+    case IceCandidatePairConfig_IceCandidateType.PRFLX:
+      return IceCandidateType.kPrflx;
+    case IceCandidatePairConfig_IceCandidateType.RELAY:
+      return IceCandidateType.kRelay;
+    default:
+      return undefined;
+  }
+}
+
+export function getRuntimeIceCandidatePairProtocol(protocol: IceCandidatePairConfig_Protocol): IceCandidatePairProtocol {
+  switch (protocol) {
+    case IceCandidatePairConfig_Protocol.UDP:
+      return IceCandidatePairProtocol.kUdp;
+    case IceCandidatePairConfig_Protocol.TCP:
+      return IceCandidatePairProtocol.kTcp;
+    case IceCandidatePairConfig_Protocol.SSLTCP:
+      return IceCandidatePairProtocol.kSsltcp;
+    case IceCandidatePairConfig_Protocol.TLS:
+      return IceCandidatePairProtocol.kTls;
+    default:
+      return IceCandidatePairProtocol.kUnknown;
+  }
+}
+
+export function getRuntimeIceCandidatePairAddressFamily(
+  addressFamily: IceCandidatePairConfig_AddressFamily,
+): IceCandidatePairAddressFamily {
+  switch (addressFamily) {
+    case IceCandidatePairConfig_AddressFamily.IPV4:
+      return IceCandidatePairAddressFamily.kIpv4;
+    case IceCandidatePairConfig_AddressFamily.IPV6:
+      return IceCandidatePairAddressFamily.kIpv6;
+    default:
+      return IceCandidatePairAddressFamily.kUnknown;
+  }
+}
+
+export function getRuntimeIceCandidateNetworkType(networkType: IceCandidatePairConfig_NetworkType): IceCandidateNetworkType {
+  switch (networkType) {
+    case IceCandidatePairConfig_NetworkType.ETHERNET:
+      return IceCandidateNetworkType.kEthernet;
+    case IceCandidatePairConfig_NetworkType.LOOPBACK:
+      return IceCandidateNetworkType.kLoopback;
+    case IceCandidatePairConfig_NetworkType.WIFI:
+      return IceCandidateNetworkType.kWifi;
+    case IceCandidatePairConfig_NetworkType.VPN:
+      return IceCandidateNetworkType.kVpn;
+    case IceCandidatePairConfig_NetworkType.CELLULAR:
+      return IceCandidateNetworkType.kCellular;
+    default:
+      return IceCandidateNetworkType.kUnknown;
+  }
+}
+
+export function getRuntimeIceCandidatePairEventType(
+  type: IceCandidatePairEvent_IceCandidatePairEventType,
+): IceCandidatePairEventType {
+  switch (type) {
+    case IceCandidatePairEvent_IceCandidatePairEventType.CHECK_SENT:
+      return IceCandidatePairEventType.kCheckSent;
+    case IceCandidatePairEvent_IceCandidatePairEventType.CHECK_RECEIVED:
+      return IceCandidatePairEventType.kCheckReceived;
+    case IceCandidatePairEvent_IceCandidatePairEventType.CHECK_RESPONSE_SENT:
+      return IceCandidatePairEventType.kCheckResponseSent;
+    case IceCandidatePairEvent_IceCandidatePairEventType.CHECK_RESPONSE_RECEIVED:
+      return IceCandidatePairEventType.kCheckResponseReceived;
+    default:
+      // UNKNOWN_CHECK_TYPE (RTC_DCHECK_NOTREACHED in upstream).
+      return IceCandidatePairEventType.kCheckSent;
+  }
+}
+
+export function getRuntimeCodecType(codec: FrameDecodedEvents_Codec): VideoCodecType {
+  switch (codec) {
+    case FrameDecodedEvents_Codec.GENERIC:
+      return VideoCodecType.kVideoCodecGeneric;
+    case FrameDecodedEvents_Codec.VP8:
+      return VideoCodecType.kVideoCodecVP8;
+    case FrameDecodedEvents_Codec.VP9:
+      return VideoCodecType.kVideoCodecVP9;
+    case FrameDecodedEvents_Codec.AV1:
+      return VideoCodecType.kVideoCodecAV1;
+    case FrameDecodedEvents_Codec.H264:
+      return VideoCodecType.kVideoCodecH264;
+    case FrameDecodedEvents_Codec.H265:
+      return VideoCodecType.kVideoCodecH265;
+    default:
+      // CODEC_UNKNOWN: "Unknown codec type. Returning generic."
+      return VideoCodecType.kVideoCodecGeneric;
+  }
+}
+
+export function getRuntimeRtpHeaderExtensionConfig(protoHeaderExtensions: RtpHeaderExtensionConfig): RtpExtension[] {
+  const S = RtpHeaderExtensionConfigSchema;
+  const p = protoHeaderExtensions;
+  const rtpExtensions: RtpExtension[] = [];
+  if (has(S, p, "transmissionTimeOffsetId")) {
+    rtpExtensions.push(new RtpExtension(RtpExtension.kTimestampOffsetUri, p.transmissionTimeOffsetId));
+  }
+  if (has(S, p, "absoluteSendTimeId")) {
+    rtpExtensions.push(new RtpExtension(RtpExtension.kAbsSendTimeUri, p.absoluteSendTimeId));
+  }
+  if (has(S, p, "transportSequenceNumberId")) {
+    rtpExtensions.push(new RtpExtension(RtpExtension.kTransportSequenceNumberUri, p.transportSequenceNumberId));
+  }
+  if (has(S, p, "audioLevelId")) {
+    rtpExtensions.push(new RtpExtension(RtpExtension.kAudioLevelUri, p.audioLevelId));
+  }
+  if (has(S, p, "videoRotationId")) {
+    rtpExtensions.push(new RtpExtension(RtpExtension.kVideoRotationUri, p.videoRotationId));
+  }
+  if (has(S, p, "dependencyDescriptorId")) {
+    rtpExtensions.push(new RtpExtension(RtpExtension.kDependencyDescriptorUri, p.dependencyDescriptorId));
+  }
+  return rtpExtensions;
+}
+
+function pushToMap<T>(map: Map<number, T[]>, key: number, value: T): void {
+  let list = map.get(key);
+  if (list === undefined) {
+    list = [];
+    map.set(key, list);
+  }
+  list.push(value);
+}
+
+// std::map iterates in key order.
+function sortedByKey<T>(map: Map<number, T>): Map<number, T> {
+  return new Map([...map.entries()].sort((a, b) => a[0] - b[0]));
 }
 
 type RtpPacketsProto = IncomingRtpPackets | OutgoingRtpPackets;
@@ -650,6 +906,26 @@ export class ParsedRtcEventLog {
   private bweLossUpdatesValue: LoggedBweLossBasedUpdate[] = [];
   private bweScreamUpdatesValue: LoggedBweScreamUpdate[] = [];
 
+  private incomingRtxSsrcsValue = new Set<number>();
+  private incomingVideoSsrcsValue = new Set<number>();
+  private incomingAudioSsrcsValue = new Set<number>();
+  private outgoingRtxSsrcsValue = new Set<number>();
+  private outgoingVideoSsrcsValue = new Set<number>();
+  private outgoingAudioSsrcsValue = new Set<number>();
+
+  private audioPlayoutEventsValue = new Map<number, LoggedAudioPlayoutEvent[]>();
+  private neteqSetMinimumDelayEventsValue = new Map<number, LoggedNetEqSetMinimumDelayEvent[]>();
+  private audioNetworkAdaptationEventsValue: LoggedAudioNetworkAdaptationEvent[] = [];
+  private dtlsTransportStatesValue: LoggedDtlsTransportState[] = [];
+  private dtlsWritableStatesValue: LoggedDtlsWritableState[] = [];
+  private decodedFramesValue = new Map<number, LoggedFrameDecoded[]>();
+  private iceCandidatePairConfigsValue: LoggedIceCandidatePairConfig[] = [];
+  private iceCandidatePairEventsValue: LoggedIceCandidatePairEvent[] = [];
+  private audioRecvConfigsValue: LoggedAudioRecvConfig[] = [];
+  private audioSendConfigsValue: LoggedAudioSendConfig[] = [];
+  private videoRecvConfigsValue: LoggedVideoRecvConfig[] = [];
+  private videoSendConfigsValue: LoggedVideoSendConfig[] = [];
+
   private firstTimestampValue: Timestamp = Timestamp.plusInfinity();
   private lastTimestampValue: Timestamp = Timestamp.minusInfinity();
   private firstLogSegmentValue = new LogSegment(0, kInt64Max);
@@ -666,6 +942,13 @@ export class ParsedRtcEventLog {
   // Clears previously parsed events and resets the ParsedRtcEventLogNew to an
   // empty state.
   clear(): void {
+    this.incomingRtxSsrcsValue = new Set();
+    this.incomingVideoSsrcsValue = new Set();
+    this.incomingAudioSsrcsValue = new Set();
+    this.outgoingRtxSsrcsValue = new Set();
+    this.outgoingVideoSsrcsValue = new Set();
+    this.outgoingAudioSsrcsValue = new Set();
+
     this.incomingRtpPacketsMap.clear();
     this.outgoingRtpPacketsMap.clear();
     this.incomingRtpPacketsBySsrcValue = [];
@@ -685,6 +968,18 @@ export class ParsedRtcEventLog {
     this.bweLossUpdatesValue = [];
     this.bweScreamUpdatesValue = [];
     this.alrStateEventsValue = [];
+    this.audioPlayoutEventsValue = new Map();
+    this.neteqSetMinimumDelayEventsValue = new Map();
+    this.audioNetworkAdaptationEventsValue = [];
+    this.dtlsTransportStatesValue = [];
+    this.dtlsWritableStatesValue = [];
+    this.decodedFramesValue = new Map();
+    this.iceCandidatePairConfigsValue = [];
+    this.iceCandidatePairEventsValue = [];
+    this.audioRecvConfigsValue = [];
+    this.audioSendConfigsValue = [];
+    this.videoRecvConfigsValue = [];
+    this.videoSendConfigsValue = [];
     // Not cleared by upstream Clear() either; reset here so that a reused
     // parser does not accumulate them.
     this.routeChangeEventsValue = [];
@@ -704,6 +999,29 @@ export class ParsedRtcEventLog {
   parseStream(s: Uint8Array): ParseStatus {
     this.clear();
     const status = this.parseStreamInternal(s);
+
+    // Cache the configured SSRCs.
+    for (const videoRecvConfig of this.videoRecvConfigsValue) {
+      this.incomingVideoSsrcsValue.add(videoRecvConfig.config.remoteSsrc);
+      this.incomingVideoSsrcsValue.add(videoRecvConfig.config.rtxSsrc);
+      this.incomingRtxSsrcsValue.add(videoRecvConfig.config.rtxSsrc);
+    }
+    for (const videoSendConfig of this.videoSendConfigsValue) {
+      this.outgoingVideoSsrcsValue.add(videoSendConfig.config.localSsrc);
+      this.outgoingVideoSsrcsValue.add(videoSendConfig.config.rtxSsrc);
+      this.outgoingRtxSsrcsValue.add(videoSendConfig.config.rtxSsrc);
+    }
+    for (const audioRecvConfig of this.audioRecvConfigsValue) {
+      this.incomingAudioSsrcsValue.add(audioRecvConfig.config.remoteSsrc);
+    }
+    for (const audioSendConfig of this.audioSendConfigsValue) {
+      this.outgoingAudioSsrcsValue.add(audioSendConfig.config.localSsrc);
+    }
+
+    // The per-SSRC maps iterate in SSRC order, like std::map.
+    this.audioPlayoutEventsValue = sortedByKey(this.audioPlayoutEventsValue);
+    this.neteqSetMinimumDelayEventsValue = sortedByKey(this.neteqSetMinimumDelayEventsValue);
+    this.decodedFramesValue = sortedByKey(this.decodedFramesValue);
 
     // ParseStreamInternal stores the RTP packets in a map indexed by SSRC.
     // Since we dont need rapid lookup based on SSRC after parsing, we move the
@@ -751,12 +1069,28 @@ export class ParsedRtcEventLog {
     this.lastTimestampValue = Timestamp.minusInfinity();
     this.storeFirstAndLastTimestamp(this.alrStateEventsValue);
     this.storeFirstAndLastTimestamp(this.routeChangeEventsValue);
+    for (const events of this.audioPlayoutEventsValue.values()) {
+      // Audio playout events are grouped by SSRC.
+      this.storeFirstAndLastTimestamp(events);
+    }
+    for (const events of this.neteqSetMinimumDelayEventsValue.values()) {
+      // NetEq SetMinimumDelay grouped by SSRC.
+      this.storeFirstAndLastTimestamp(events);
+    }
+    this.storeFirstAndLastTimestamp(this.audioNetworkAdaptationEventsValue);
     this.storeFirstAndLastTimestamp(this.bweProbeClusterCreatedEventsValue);
     this.storeFirstAndLastTimestamp(this.bweProbeFailureEventsValue);
     this.storeFirstAndLastTimestamp(this.bweProbeSuccessEventsValue);
     this.storeFirstAndLastTimestamp(this.bweDelayUpdatesValue);
     this.storeFirstAndLastTimestamp(this.bweLossUpdatesValue);
     this.storeFirstAndLastTimestamp(this.bweScreamUpdatesValue);
+    for (const frames of this.decodedFramesValue.values()) {
+      this.storeFirstAndLastTimestamp(frames);
+    }
+    this.storeFirstAndLastTimestamp(this.dtlsTransportStatesValue);
+    this.storeFirstAndLastTimestamp(this.dtlsWritableStatesValue);
+    this.storeFirstAndLastTimestamp(this.iceCandidatePairConfigsValue);
+    this.storeFirstAndLastTimestamp(this.iceCandidatePairEventsValue);
     for (const rtpStream of this.incomingRtpPacketsBySsrcValue) {
       this.storeFirstAndLastTimestamp(rtpStream.incomingPackets);
     }
@@ -803,6 +1137,116 @@ export class ParsedRtcEventLog {
 
   stopLogEvents(): readonly LoggedStopEvent[] {
     return this.stopLogEventsValue;
+  }
+
+  getMediaType(ssrc: number, direction: PacketDirection): MediaType {
+    if (direction === PacketDirection.kIncomingPacket) {
+      if (this.incomingVideoSsrcsValue.has(ssrc)) return MediaType.VIDEO;
+      if (this.incomingAudioSsrcsValue.has(ssrc)) return MediaType.AUDIO;
+    } else {
+      if (this.outgoingVideoSsrcsValue.has(ssrc)) return MediaType.VIDEO;
+      if (this.outgoingAudioSsrcsValue.has(ssrc)) return MediaType.AUDIO;
+    }
+    return MediaType.ANY;
+  }
+
+  incomingRtxSsrcs(): ReadonlySet<number> {
+    return this.incomingRtxSsrcsValue;
+  }
+  incomingVideoSsrcs(): ReadonlySet<number> {
+    return this.incomingVideoSsrcsValue;
+  }
+  incomingAudioSsrcs(): ReadonlySet<number> {
+    return this.incomingAudioSsrcsValue;
+  }
+  outgoingRtxSsrcs(): ReadonlySet<number> {
+    return this.outgoingRtxSsrcsValue;
+  }
+  outgoingVideoSsrcs(): ReadonlySet<number> {
+    return this.outgoingVideoSsrcsValue;
+  }
+  outgoingAudioSsrcs(): ReadonlySet<number> {
+    return this.outgoingAudioSsrcsValue;
+  }
+
+  audioRecvConfigs(): readonly LoggedAudioRecvConfig[] {
+    return this.audioRecvConfigsValue;
+  }
+  audioSendConfigs(): readonly LoggedAudioSendConfig[] {
+    return this.audioSendConfigsValue;
+  }
+  videoRecvConfigs(): readonly LoggedVideoRecvConfig[] {
+    return this.videoRecvConfigsValue;
+  }
+  videoSendConfigs(): readonly LoggedVideoSendConfig[] {
+    return this.videoSendConfigsValue;
+  }
+
+  audioPlayoutEvents(): ReadonlyMap<number, readonly LoggedAudioPlayoutEvent[]> {
+    return this.audioPlayoutEventsValue;
+  }
+
+  neteqSetMinimumDelayEvents(): ReadonlyMap<number, readonly LoggedNetEqSetMinimumDelayEvent[]> {
+    return this.neteqSetMinimumDelayEventsValue;
+  }
+
+  audioNetworkAdaptationEvents(): readonly LoggedAudioNetworkAdaptationEvent[] {
+    return this.audioNetworkAdaptationEventsValue;
+  }
+
+  dtlsTransportStates(): readonly LoggedDtlsTransportState[] {
+    return this.dtlsTransportStatesValue;
+  }
+
+  dtlsWritableStates(): readonly LoggedDtlsWritableState[] {
+    return this.dtlsWritableStatesValue;
+  }
+
+  iceCandidatePairConfigs(): readonly LoggedIceCandidatePairConfig[] {
+    return this.iceCandidatePairConfigsValue;
+  }
+
+  iceCandidatePairEvents(): readonly LoggedIceCandidatePairEvent[] {
+    return this.iceCandidatePairEventsValue;
+  }
+
+  decodedFrames(): ReadonlyMap<number, readonly LoggedFrameDecoded[]> {
+    return this.decodedFramesValue;
+  }
+
+  getIceCandidates(): LoggedIceCandidatePairConfig[] {
+    const candidates: LoggedIceCandidatePairConfig[] = [];
+    const added = new Set<number>();
+    for (const candidate of this.iceCandidatePairConfigsValue) {
+      if (!added.has(candidate.candidatePairId)) {
+        candidates.push(candidate);
+        added.add(candidate.candidatePairId);
+      }
+    }
+    return candidates;
+  }
+
+  getRouteChanges(): InferredRouteChangeEvent[] {
+    const routeChanges: InferredRouteChangeEvent[] = [];
+    for (const candidate of this.iceCandidatePairConfigsValue) {
+      if (candidate.type === IceCandidatePairConfigType.kSelected) {
+        const route = new InferredRouteChangeEvent();
+        route.routeId = candidate.candidatePairId;
+        route.logTime = Timestamp.millis(candidate.logTimeMs());
+        route.sendOverhead = kUdpOverhead + kSrtpOverhead + kIpv4Overhead;
+        if (candidate.remoteAddressFamily === IceCandidatePairAddressFamily.kIpv6) {
+          route.sendOverhead += kIpv6Overhead - kIpv4Overhead;
+        }
+        if (candidate.remoteCandidateType !== IceCandidateType.kHost) route.sendOverhead += kStunOverhead;
+        route.returnOverhead = kUdpOverhead + kSrtpOverhead + kIpv4Overhead;
+        if (candidate.remoteAddressFamily === IceCandidatePairAddressFamily.kIpv6) {
+          route.returnOverhead += kIpv6Overhead - kIpv4Overhead;
+        }
+        if (candidate.remoteCandidateType !== IceCandidateType.kHost) route.returnOverhead += kStunOverhead;
+        routeChanges.push(route);
+      }
+    }
+    return routeChanges;
   }
 
   alrStateEvents(): readonly LoggedAlrStateEvent[] {
@@ -1001,8 +1445,40 @@ export class ParsedRtcEventLog {
       return this.storeRouteChangeEvent(stream.routeChanges[0]);
     } else if (stream.remoteEstimates.length === 1) {
       return this.storeRemoteEstimateEvent(stream.remoteEstimates[0]);
+    } else if (stream.audioPlayoutEvents.length === 1) {
+      return this.storeAudioPlayoutEvent(stream.audioPlayoutEvents[0]);
+    } else if (stream.dtlsTransportStateEvents.length === 1) {
+      return this.storeDtlsTransportState(stream.dtlsTransportStateEvents[0]);
+    } else if (stream.dtlsWritableStates.length === 1) {
+      return this.storeDtlsWritableState(stream.dtlsWritableStates[0]);
+    } else if (stream.audioNetworkAdaptations.length === 1) {
+      return this.storeAudioNetworkAdaptationEvent(stream.audioNetworkAdaptations[0]);
+    } else if (stream.iceCandidateConfigs.length === 1) {
+      return this.storeIceCandidatePairConfig(stream.iceCandidateConfigs[0]);
+    } else if (stream.iceCandidateEvents.length === 1) {
+      return this.storeIceCandidateEvent(stream.iceCandidateEvents[0]);
+    } else if (stream.audioRecvStreamConfigs.length === 1) {
+      return this.storeAudioRecvConfig(stream.audioRecvStreamConfigs[0]);
+    } else if (stream.audioSendStreamConfigs.length === 1) {
+      return this.storeAudioSendConfig(stream.audioSendStreamConfigs[0]);
+    } else if (stream.videoRecvStreamConfigs.length === 1) {
+      return this.storeVideoRecvConfig(stream.videoRecvStreamConfigs[0]);
+    } else if (stream.videoSendStreamConfigs.length === 1) {
+      return this.storeVideoSendConfig(stream.videoSendStreamConfigs[0]);
+    } else if (
+      stream.genericPacketsReceived.length === 1 ||
+      stream.genericPacketsSent.length === 1 ||
+      stream.genericAcksReceived.length === 1
+    ) {
+      // Generic packet type is deprecated. Ignore the proto event.
+      return ParseStatus.success();
+    } else if (stream.frameDecodedEvents.length === 1) {
+      return this.storeFrameDecodedEvents(stream.frameDecodedEvents[0]);
+    } else if (stream.neteqSetMinimumDelay.length === 1) {
+      return this.storeNetEqSetMinimumDelay(stream.neteqSetMinimumDelay[0]);
     } else {
-      // TODO(stages 3-4): the remaining event types are not ported yet.
+      // RTC_DCHECK_NOTREACHED() upstream: an EventStream without exactly one
+      // known event (e.g. a newer field).
       return ParseStatus.success();
     }
   }
@@ -1339,6 +1815,464 @@ export class ParsedRtcEventLog {
       ),
     );
     // TODO(terelius): Should we delta encode this event type?
+    return ParseStatus.success();
+  }
+
+  private storeAudioPlayoutEvent(proto: AudioPlayoutEvents): ParseStatus {
+    const S = AudioPlayoutEventsSchema;
+    if (!has(S, proto, "timestampMs")) return ParseStatus.error("proto.has_timestamp_ms()");
+    if (!has(S, proto, "localSsrc")) return ParseStatus.error("proto.has_local_ssrc()");
+
+    // Base event
+    pushToMap(
+      this.audioPlayoutEventsValue,
+      proto.localSsrc,
+      new LoggedAudioPlayoutEvent(Timestamp.millis(proto.timestampMs), proto.localSsrc),
+    );
+
+    const numberOfDeltas = has(S, proto, "numberOfDeltas") ? proto.numberOfDeltas : 0;
+    if (numberOfDeltas === 0) {
+      return ParseStatus.success();
+    }
+
+    // timestamp_ms
+    const timestampMsValues = decodeField("timestamp_ms", proto.timestampMsDeltas, toUnsigned(proto.timestampMs, 64), numberOfDeltas);
+    if (timestampMsValues instanceof RtcEventLogParseStatus) return timestampMsValues;
+    // local_ssrc
+    const localSsrcValues = decodeField("local_ssrc", proto.localSsrcDeltas, BigInt(proto.localSsrc), numberOfDeltas);
+    if (localSsrcValues instanceof RtcEventLogParseStatus) return localSsrcValues;
+
+    // Populate events from decoded deltas
+    for (let i = 0; i < numberOfDeltas; ++i) {
+      if (timestampMsValues[i] === undefined) return ParseStatus.error("timestamp_ms_values[i].has_value()");
+      const localSsrc = deltaU32("local_ssrc", localSsrcValues, i);
+      if (localSsrc instanceof RtcEventLogParseStatus) return localSsrc;
+      const timestampMs = deltaTimestampMs(timestampMsValues, i);
+      if (timestampMs instanceof RtcEventLogParseStatus) return timestampMs;
+      pushToMap(this.audioPlayoutEventsValue, localSsrc, new LoggedAudioPlayoutEvent(Timestamp.millis(timestampMs), localSsrc));
+    }
+    return ParseStatus.success();
+  }
+
+  private storeNetEqSetMinimumDelay(proto: NetEqSetMinimumDelay): ParseStatus {
+    const S = NetEqSetMinimumDelaySchema;
+    if (!has(S, proto, "timestampMs")) return ParseStatus.error("proto.has_timestamp_ms()");
+    if (!has(S, proto, "remoteSsrc")) return ParseStatus.error("proto.has_remote_ssrc()");
+    if (!has(S, proto, "minimumDelayMs")) return ParseStatus.error("proto.has_minimum_delay_ms()");
+
+    // Base event
+    pushToMap(
+      this.neteqSetMinimumDelayEventsValue,
+      proto.remoteSsrc,
+      new LoggedNetEqSetMinimumDelayEvent(Timestamp.millis(proto.timestampMs), proto.remoteSsrc, proto.minimumDelayMs),
+    );
+
+    const numberOfDeltas = has(S, proto, "numberOfDeltas") ? proto.numberOfDeltas : 0;
+    if (numberOfDeltas === 0) {
+      return ParseStatus.success();
+    }
+
+    const timestampMsValues = decodeField("timestamp_ms", proto.timestampMsDeltas, toUnsigned(proto.timestampMs, 64), numberOfDeltas);
+    if (timestampMsValues instanceof RtcEventLogParseStatus) return timestampMsValues;
+    const remoteSsrcValues = decodeField("remote_ssrc", proto.remoteSsrcDeltas, BigInt(proto.remoteSsrc), numberOfDeltas);
+    if (remoteSsrcValues instanceof RtcEventLogParseStatus) return remoteSsrcValues;
+    const minimumDelayMsValues = decodeField(
+      "minimum_delay_ms",
+      proto.minimumDelayMsDeltas,
+      toUnsigned(BigInt(proto.minimumDelayMs), 32),
+      numberOfDeltas,
+    );
+    if (minimumDelayMsValues instanceof RtcEventLogParseStatus) return minimumDelayMsValues;
+
+    // Populate events from decoded deltas
+    for (let i = 0; i < numberOfDeltas; ++i) {
+      if (timestampMsValues[i] === undefined) return ParseStatus.error("timestamp_ms_values[i].has_value()");
+      const remoteSsrc = deltaU32("remote_ssrc", remoteSsrcValues, i);
+      if (remoteSsrc instanceof RtcEventLogParseStatus) return remoteSsrc;
+      const minimumDelayMsValue = minimumDelayMsValues[i];
+      if (minimumDelayMsValue === undefined) return ParseStatus.error("minimum_delay_ms_values[i].has_value()");
+      const timestampMs = deltaTimestampMs(timestampMsValues, i);
+      if (timestampMs instanceof RtcEventLogParseStatus) return timestampMs;
+      const minimumDelayMs = toSigned(minimumDelayMsValue, 32);
+      if (minimumDelayMs === undefined) return ParseStatus.error("ToSigned(minimum_delay_ms_values[i].value(), &minimum_delay_ms)");
+      pushToMap(
+        this.neteqSetMinimumDelayEventsValue,
+        remoteSsrc,
+        new LoggedNetEqSetMinimumDelayEvent(Timestamp.millis(timestampMs), remoteSsrc, Number(minimumDelayMs)),
+      );
+    }
+    return ParseStatus.success();
+  }
+
+  private storeAudioNetworkAdaptationEvent(proto: AudioNetworkAdaptations): ParseStatus {
+    const S = AudioNetworkAdaptationsSchema;
+    if (!has(S, proto, "timestampMs")) return ParseStatus.error("proto.has_timestamp_ms()");
+
+    // Base event
+    {
+      const runtimeConfig = new AudioEncoderRuntimeConfig();
+      if (has(S, proto, "bitrateBps")) {
+        runtimeConfig.bitrateBps = proto.bitrateBps;
+      }
+      if (has(S, proto, "frameLengthMs")) {
+        runtimeConfig.frameLengthMs = proto.frameLengthMs;
+      }
+      if (has(S, proto, "uplinkPacketLossFraction")) {
+        const uplinkPacketLossFraction = parsePacketLossFractionFromProtoFormat(proto.uplinkPacketLossFraction);
+        if (uplinkPacketLossFraction === undefined) {
+          return ParseStatus.error(
+            "ParsePacketLossFractionFromProtoFormat(proto.uplink_packet_loss_fraction(), &uplink_packet_loss_fraction)",
+          );
+        }
+        runtimeConfig.uplinkPacketLossFraction = uplinkPacketLossFraction;
+      }
+      if (has(S, proto, "enableFec")) {
+        runtimeConfig.enableFec = proto.enableFec;
+      }
+      if (has(S, proto, "enableDtx")) {
+        runtimeConfig.enableDtx = proto.enableDtx;
+      }
+      if (has(S, proto, "numChannels")) {
+        runtimeConfig.numChannels = proto.numChannels;
+      }
+      this.audioNetworkAdaptationEventsValue.push(
+        new LoggedAudioNetworkAdaptationEvent(Timestamp.millis(proto.timestampMs), runtimeConfig),
+      );
+    }
+
+    const numberOfDeltas = has(S, proto, "numberOfDeltas") ? proto.numberOfDeltas : 0;
+    if (numberOfDeltas === 0) {
+      return ParseStatus.success();
+    }
+
+    // timestamp_ms
+    const timestampMsValues = decodeField("timestamp_ms", proto.timestampMsDeltas, toUnsigned(proto.timestampMs, 64), numberOfDeltas);
+    if (timestampMsValues instanceof RtcEventLogParseStatus) return timestampMsValues;
+
+    // bitrate_bps
+    const bitrateBpsValues = decodeField(
+      "bitrate_bps",
+      proto.bitrateBpsDeltas,
+      has(S, proto, "bitrateBps") ? toUnsigned(BigInt(proto.bitrateBps), 32) : undefined,
+      numberOfDeltas,
+    );
+    if (bitrateBpsValues instanceof RtcEventLogParseStatus) return bitrateBpsValues;
+
+    // frame_length_ms
+    const frameLengthMsValues = decodeField(
+      "frame_length_ms",
+      proto.frameLengthMsDeltas,
+      has(S, proto, "frameLengthMs") ? toUnsigned(BigInt(proto.frameLengthMs), 32) : undefined,
+      numberOfDeltas,
+    );
+    if (frameLengthMsValues instanceof RtcEventLogParseStatus) return frameLengthMsValues;
+
+    // uplink_packet_loss_fraction
+    const uplinkPacketLossFractionValues = decodeField(
+      "uplink_packet_loss_fraction",
+      proto.uplinkPacketLossFractionDeltas,
+      has(S, proto, "uplinkPacketLossFraction") ? BigInt(proto.uplinkPacketLossFraction) : undefined,
+      numberOfDeltas,
+    );
+    if (uplinkPacketLossFractionValues instanceof RtcEventLogParseStatus) return uplinkPacketLossFractionValues;
+
+    // enable_fec
+    const enableFecValues = decodeField(
+      "enable_fec",
+      proto.enableFecDeltas,
+      has(S, proto, "enableFec") ? (proto.enableFec ? 1n : 0n) : undefined,
+      numberOfDeltas,
+    );
+    if (enableFecValues instanceof RtcEventLogParseStatus) return enableFecValues;
+
+    // enable_dtx
+    const enableDtxValues = decodeField(
+      "enable_dtx",
+      proto.enableDtxDeltas,
+      has(S, proto, "enableDtx") ? (proto.enableDtx ? 1n : 0n) : undefined,
+      numberOfDeltas,
+    );
+    if (enableDtxValues instanceof RtcEventLogParseStatus) return enableDtxValues;
+
+    // num_channels
+    // Note: For num_channels_deltas, encoding (num_channels - 1) is used, since
+    // a channel count of 0 is not meaningful.
+    let shiftedBaseNumChannels: OptionalU64;
+    if (has(S, proto, "numChannels")) {
+      // uint32 arithmetic: 0 - 1 wraps.
+      shiftedBaseNumChannels = BigInt((proto.numChannels - 1) >>> 0);
+    }
+    const numChannelsValues = decodeDeltas(proto.numChannelsDeltas, shiftedBaseNumChannels, numberOfDeltas);
+    for (let i = 0; i < numChannelsValues.length; ++i) {
+      const value = numChannelsValues[i];
+      if (value !== undefined) {
+        numChannelsValues[i] = BigInt.asUintN(64, value + 1n);
+      }
+    }
+    if (numChannelsValues.length !== numberOfDeltas) {
+      return ParseStatus.error("num_channels_values.size()==number_of_deltas");
+    }
+
+    // Populate events from decoded deltas
+    for (let i = 0; i < numberOfDeltas; ++i) {
+      const timestampMs = deltaTimestampMs(timestampMsValues, i);
+      if (timestampMs instanceof RtcEventLogParseStatus) return timestampMs;
+
+      const runtimeConfig = new AudioEncoderRuntimeConfig();
+      const bitrateBps = bitrateBpsValues[i];
+      if (bitrateBps !== undefined) {
+        const signedBitrateBps = toSigned(bitrateBps, 32);
+        if (signedBitrateBps === undefined) return ParseStatus.error("ToSigned(bitrate_bps_values[i].value(), &signed_bitrate_bps)");
+        runtimeConfig.bitrateBps = Number(signedBitrateBps);
+      }
+      const frameLengthMs = frameLengthMsValues[i];
+      if (frameLengthMs !== undefined) {
+        const signedFrameLengthMs = toSigned(frameLengthMs, 32);
+        if (signedFrameLengthMs === undefined) {
+          return ParseStatus.error("ToSigned(frame_length_ms_values[i].value(), &signed_frame_length_ms)");
+        }
+        runtimeConfig.frameLengthMs = Number(signedFrameLengthMs);
+      }
+      const uplinkPacketLossFractionValue = uplinkPacketLossFractionValues[i];
+      if (uplinkPacketLossFractionValue !== undefined) {
+        if (uplinkPacketLossFractionValue > kU32Max) {
+          return ParseStatus.error("IsValueInRangeForNumericType<uint32_t>(uplink_packet_loss_fraction_values[i].value())");
+        }
+        const uplinkPacketLossFraction = parsePacketLossFractionFromProtoFormat(Number(uplinkPacketLossFractionValue));
+        if (uplinkPacketLossFraction === undefined) {
+          return ParseStatus.error(
+            "ParsePacketLossFractionFromProtoFormat(static_cast<uint32_t>(uplink_packet_loss_fraction_values[i].value()), &uplink_packet_loss_fraction2)",
+          );
+        }
+        runtimeConfig.uplinkPacketLossFraction = uplinkPacketLossFraction;
+      }
+      const enableFec = enableFecValues[i];
+      if (enableFec !== undefined) {
+        if (enableFec > 1n) return ParseStatus.error("IsValueInRangeForNumericType<bool>(enable_fec_values[i].value())");
+        runtimeConfig.enableFec = enableFec === 1n;
+      }
+      const enableDtx = enableDtxValues[i];
+      if (enableDtx !== undefined) {
+        if (enableDtx > 1n) return ParseStatus.error("IsValueInRangeForNumericType<bool>(enable_dtx_values[i].value())");
+        runtimeConfig.enableDtx = enableDtx === 1n;
+      }
+      const numChannels = numChannelsValues[i];
+      if (numChannels !== undefined) {
+        runtimeConfig.numChannels = Number(numChannels);
+      }
+      this.audioNetworkAdaptationEventsValue.push(new LoggedAudioNetworkAdaptationEvent(Timestamp.millis(timestampMs), runtimeConfig));
+    }
+    return ParseStatus.success();
+  }
+
+  private storeDtlsTransportState(proto: DtlsTransportStateEvent): ParseStatus {
+    const S = DtlsTransportStateEventSchema;
+    if (!has(S, proto, "timestampMs")) return ParseStatus.error("proto.has_timestamp_ms()");
+    if (!has(S, proto, "dtlsTransportState")) return ParseStatus.error("proto.has_dtls_transport_state()");
+    this.dtlsTransportStatesValue.push(
+      new LoggedDtlsTransportState(Timestamp.millis(proto.timestampMs), getRuntimeDtlsTransportState(proto.dtlsTransportState)),
+    );
+    return ParseStatus.success();
+  }
+
+  private storeDtlsWritableState(proto: DtlsWritableState): ParseStatus {
+    const S = DtlsWritableStateSchema;
+    if (!has(S, proto, "timestampMs")) return ParseStatus.error("proto.has_timestamp_ms()");
+    if (!has(S, proto, "writable")) return ParseStatus.error("proto.has_writable()");
+    this.dtlsWritableStatesValue.push(new LoggedDtlsWritableState(Timestamp.millis(proto.timestampMs), proto.writable));
+    return ParseStatus.success();
+  }
+
+  private storeFrameDecodedEvents(proto: FrameDecodedEvents): ParseStatus {
+    const S = FrameDecodedEventsSchema;
+    for (const field of ["timestampMs", "ssrc", "renderTimeMs", "width", "height", "codec", "qp"] as const) {
+      if (!has(S, proto, field)) return ParseStatus.error(`proto.has_${field}()`);
+    }
+
+    const baseFrame = new LoggedFrameDecoded(Timestamp.millis(proto.timestampMs));
+    baseFrame.ssrc = proto.ssrc;
+    baseFrame.renderTimeMs = proto.renderTimeMs;
+    baseFrame.width = proto.width;
+    baseFrame.height = proto.height;
+    baseFrame.codec = getRuntimeCodecType(proto.codec);
+    if (!(proto.qp <= 255)) return ParseStatus.error("proto.qp()<=255");
+    baseFrame.qp = proto.qp;
+    pushToMap(this.decodedFramesValue, baseFrame.ssrc, baseFrame);
+
+    const numberOfDeltas = has(S, proto, "numberOfDeltas") ? proto.numberOfDeltas : 0;
+    if (numberOfDeltas === 0) {
+      return ParseStatus.success();
+    }
+
+    const timestampMsValues = decodeField("timestamp_ms", proto.timestampMsDeltas, toUnsigned(proto.timestampMs, 64), numberOfDeltas);
+    if (timestampMsValues instanceof RtcEventLogParseStatus) return timestampMsValues;
+    const ssrcValues = decodeField("ssrc", proto.ssrcDeltas, BigInt(proto.ssrc), numberOfDeltas);
+    if (ssrcValues instanceof RtcEventLogParseStatus) return ssrcValues;
+    const renderTimeMsValues = decodeField("render_time_ms", proto.renderTimeMsDeltas, toUnsigned(proto.renderTimeMs, 64), numberOfDeltas);
+    if (renderTimeMsValues instanceof RtcEventLogParseStatus) return renderTimeMsValues;
+    const widthValues = decodeField("width", proto.widthDeltas, toUnsigned(BigInt(proto.width), 32), numberOfDeltas);
+    if (widthValues instanceof RtcEventLogParseStatus) return widthValues;
+    const heightValues = decodeField("height", proto.heightDeltas, toUnsigned(BigInt(proto.height), 32), numberOfDeltas);
+    if (heightValues instanceof RtcEventLogParseStatus) return heightValues;
+    const codecValues = decodeField("codec", proto.codecDeltas, BigInt.asUintN(64, BigInt(proto.codec)), numberOfDeltas);
+    if (codecValues instanceof RtcEventLogParseStatus) return codecValues;
+    const qpValues = decodeField("qp", proto.qpDeltas, BigInt(proto.qp), numberOfDeltas);
+    if (qpValues instanceof RtcEventLogParseStatus) return qpValues;
+
+    // Populate events from decoded deltas
+    for (let i = 0; i < numberOfDeltas; ++i) {
+      const timestampMs = deltaTimestampMs(timestampMsValues, i);
+      if (timestampMs instanceof RtcEventLogParseStatus) return timestampMs;
+      const frame = new LoggedFrameDecoded(Timestamp.millis(timestampMs));
+      const ssrc = deltaU32("ssrc", ssrcValues, i);
+      if (ssrc instanceof RtcEventLogParseStatus) return ssrc;
+      frame.ssrc = ssrc;
+      const renderTimeMsValue = renderTimeMsValues[i];
+      if (renderTimeMsValue === undefined) return ParseStatus.error("render_time_ms_values[i].has_value()");
+      const renderTimeMs = toSigned(renderTimeMsValue, 64);
+      if (renderTimeMs === undefined) return ParseStatus.error("ToSigned(render_time_ms_values[i].value(), &frame.render_time_ms)");
+      frame.renderTimeMs = renderTimeMs;
+      const widthValue = widthValues[i];
+      if (widthValue === undefined) return ParseStatus.error("width_values[i].has_value()");
+      const width = toSigned(widthValue, 32);
+      if (width === undefined) return ParseStatus.error("ToSigned(width_values[i].value(), &frame.width)");
+      frame.width = Number(width);
+      const heightValue = heightValues[i];
+      if (heightValue === undefined) return ParseStatus.error("height_values[i].has_value()");
+      const height = toSigned(heightValue, 32);
+      if (height === undefined) return ParseStatus.error("ToSigned(height_values[i].value(), &frame.height)");
+      frame.height = Number(height);
+      const codec = codecValues[i];
+      if (codec === undefined) return ParseStatus.error("codec_values[i].has_value()");
+      frame.codec = getRuntimeCodecType(Number(BigInt.asIntN(32, codec)) as FrameDecodedEvents_Codec);
+      const qp = qpValues[i];
+      if (qp === undefined) return ParseStatus.error("qp_values[i].has_value()");
+      if (qp > kU8Max) return ParseStatus.error("qp_values[i].value()<=std::numeric_limits<uint8_t>::max()");
+      frame.qp = Number(qp);
+      pushToMap(this.decodedFramesValue, frame.ssrc, frame);
+    }
+    return ParseStatus.success();
+  }
+
+  private storeIceCandidatePairConfig(proto: IceCandidatePairConfig): ParseStatus {
+    const S = IceCandidatePairConfigSchema;
+    const iceConfig = new LoggedIceCandidatePairConfig();
+    if (!has(S, proto, "timestampMs")) return ParseStatus.error("proto.has_timestamp_ms()");
+    iceConfig.timestamp = Timestamp.millis(proto.timestampMs);
+    if (!has(S, proto, "configType")) return ParseStatus.error("proto.has_config_type()");
+    iceConfig.type = getRuntimeIceCandidatePairConfigType(proto.configType);
+    if (!has(S, proto, "candidatePairId")) return ParseStatus.error("proto.has_candidate_pair_id()");
+    iceConfig.candidatePairId = proto.candidatePairId;
+    if (!has(S, proto, "localCandidateType")) return ParseStatus.error("proto.has_local_candidate_type()");
+    const localCandidateType = getRuntimeIceCandidateType(proto.localCandidateType);
+    if (localCandidateType === undefined) {
+      return ParseStatus.error("GetRuntimeIceCandidateType(proto.local_candidate_type(), ice_config.local_candidate_type)");
+    }
+    iceConfig.localCandidateType = localCandidateType;
+    if (!has(S, proto, "localRelayProtocol")) return ParseStatus.error("proto.has_local_relay_protocol()");
+    iceConfig.localRelayProtocol = getRuntimeIceCandidatePairProtocol(proto.localRelayProtocol);
+    if (!has(S, proto, "localNetworkType")) return ParseStatus.error("proto.has_local_network_type()");
+    iceConfig.localNetworkType = getRuntimeIceCandidateNetworkType(proto.localNetworkType);
+    if (!has(S, proto, "localAddressFamily")) return ParseStatus.error("proto.has_local_address_family()");
+    iceConfig.localAddressFamily = getRuntimeIceCandidatePairAddressFamily(proto.localAddressFamily);
+    if (!has(S, proto, "remoteCandidateType")) return ParseStatus.error("proto.has_remote_candidate_type()");
+    const remoteCandidateType = getRuntimeIceCandidateType(proto.remoteCandidateType);
+    if (remoteCandidateType === undefined) {
+      return ParseStatus.error("GetRuntimeIceCandidateType(proto.remote_candidate_type(), ice_config.remote_candidate_type)");
+    }
+    iceConfig.remoteCandidateType = remoteCandidateType;
+    if (!has(S, proto, "remoteAddressFamily")) return ParseStatus.error("proto.has_remote_address_family()");
+    iceConfig.remoteAddressFamily = getRuntimeIceCandidatePairAddressFamily(proto.remoteAddressFamily);
+    if (!has(S, proto, "candidatePairProtocol")) return ParseStatus.error("proto.has_candidate_pair_protocol()");
+    iceConfig.candidatePairProtocol = getRuntimeIceCandidatePairProtocol(proto.candidatePairProtocol);
+
+    this.iceCandidatePairConfigsValue.push(iceConfig);
+
+    // TODO(terelius): Should we delta encode this event type?
+    return ParseStatus.success();
+  }
+
+  private storeIceCandidateEvent(proto: IceCandidatePairEvent): ParseStatus {
+    const S = IceCandidatePairEventSchema;
+    if (!has(S, proto, "timestampMs")) return ParseStatus.error("proto.has_timestamp_ms()");
+    if (!has(S, proto, "eventType")) return ParseStatus.error("proto.has_event_type()");
+    if (!has(S, proto, "candidatePairId")) return ParseStatus.error("proto.has_candidate_pair_id()");
+    this.iceCandidatePairEventsValue.push(
+      new LoggedIceCandidatePairEvent(
+        Timestamp.millis(proto.timestampMs),
+        getRuntimeIceCandidatePairEventType(proto.eventType),
+        proto.candidatePairId,
+        has(S, proto, "transactionId") ? proto.transactionId : 0,
+      ),
+    );
+
+    // TODO(terelius): Should we delta encode this event type?
+    return ParseStatus.success();
+  }
+
+  private storeAudioRecvConfig(proto: AudioRecvStreamConfig): ParseStatus {
+    const S = AudioRecvStreamConfigSchema;
+    const stream = new LoggedAudioRecvConfig();
+    if (!has(S, proto, "timestampMs")) return ParseStatus.error("proto.has_timestamp_ms()");
+    stream.timestamp = Timestamp.millis(proto.timestampMs);
+    if (!has(S, proto, "remoteSsrc")) return ParseStatus.error("proto.has_remote_ssrc()");
+    stream.config.remoteSsrc = proto.remoteSsrc;
+    if (!has(S, proto, "localSsrc")) return ParseStatus.error("proto.has_local_ssrc()");
+    stream.config.localSsrc = proto.localSsrc;
+    if (proto.headerExtensions !== undefined) {
+      stream.config.rtpExtensions = getRuntimeRtpHeaderExtensionConfig(proto.headerExtensions);
+    }
+    this.audioRecvConfigsValue.push(stream);
+    return ParseStatus.success();
+  }
+
+  private storeAudioSendConfig(proto: AudioSendStreamConfig): ParseStatus {
+    const S = AudioSendStreamConfigSchema;
+    const stream = new LoggedAudioSendConfig();
+    if (!has(S, proto, "timestampMs")) return ParseStatus.error("proto.has_timestamp_ms()");
+    stream.timestamp = Timestamp.millis(proto.timestampMs);
+    if (!has(S, proto, "ssrc")) return ParseStatus.error("proto.has_ssrc()");
+    stream.config.localSsrc = proto.ssrc;
+    if (proto.headerExtensions !== undefined) {
+      stream.config.rtpExtensions = getRuntimeRtpHeaderExtensionConfig(proto.headerExtensions);
+    }
+    this.audioSendConfigsValue.push(stream);
+    return ParseStatus.success();
+  }
+
+  private storeVideoRecvConfig(proto: VideoRecvStreamConfig): ParseStatus {
+    const S = VideoRecvStreamConfigSchema;
+    const stream = new LoggedVideoRecvConfig();
+    if (!has(S, proto, "timestampMs")) return ParseStatus.error("proto.has_timestamp_ms()");
+    stream.timestamp = Timestamp.millis(proto.timestampMs);
+    if (!has(S, proto, "remoteSsrc")) return ParseStatus.error("proto.has_remote_ssrc()");
+    stream.config.remoteSsrc = proto.remoteSsrc;
+    if (!has(S, proto, "localSsrc")) return ParseStatus.error("proto.has_local_ssrc()");
+    stream.config.localSsrc = proto.localSsrc;
+    if (has(S, proto, "rtxSsrc")) {
+      stream.config.rtxSsrc = proto.rtxSsrc;
+    }
+    if (proto.headerExtensions !== undefined) {
+      stream.config.rtpExtensions = getRuntimeRtpHeaderExtensionConfig(proto.headerExtensions);
+    }
+    this.videoRecvConfigsValue.push(stream);
+    return ParseStatus.success();
+  }
+
+  private storeVideoSendConfig(proto: VideoSendStreamConfig): ParseStatus {
+    const S = VideoSendStreamConfigSchema;
+    const stream = new LoggedVideoSendConfig();
+    if (!has(S, proto, "timestampMs")) return ParseStatus.error("proto.has_timestamp_ms()");
+    stream.timestamp = Timestamp.millis(proto.timestampMs);
+    if (!has(S, proto, "ssrc")) return ParseStatus.error("proto.has_ssrc()");
+    stream.config.localSsrc = proto.ssrc;
+    if (has(S, proto, "rtxSsrc")) {
+      stream.config.rtxSsrc = proto.rtxSsrc;
+    }
+    if (proto.headerExtensions !== undefined) {
+      stream.config.rtpExtensions = getRuntimeRtpHeaderExtensionConfig(proto.headerExtensions);
+    }
+    this.videoSendConfigsValue.push(stream);
     return ParseStatus.success();
   }
 

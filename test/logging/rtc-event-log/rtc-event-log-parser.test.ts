@@ -185,7 +185,7 @@ describe("ParsedRtcEventLog (new format)", () => {
     expect(parsed.lastTimestamp()).toBe(13_000);
   });
 
-  test("SkipsEventTypesNotPortedYet", () => {
+  test("MixedEventTypes", () => {
     const log = concatBytes(
       eventStreamBytes({dtlsWritableStates: [{timestampMs: 5n, writable: true}]}),
       incomingRtcpBatch([{timestampMs: 6, packet: bytes(1, 2, 3, 4)}]),
