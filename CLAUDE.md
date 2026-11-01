@@ -20,7 +20,10 @@ yarn typecheck         # tsc --noEmit
 yarn build             # rollup -> dist/index.mjs + types/index.d.ts
 yarn gen:proto         # protoc + protoc-gen-es: proto/rtc_event_log2.proto -> src/gen (committed)
 sh tools/cpp-vectors/build.sh  # build the upstream C++ encoders from cpp/ and rewrite test/.../encoder/cpp-vectors.json
+sh tools/cpp-golden/build.sh   # build upstream encoder+parser+EventGenerator (clang++, cmake, ninja, protobuf, gtest) and rewrite test/logging/rtc-event-log/golden/
 ```
+
+The golden test (`test/logging/rtc-event-log/golden.test.ts`) compares the port's `golden-dump.ts` with the C++ `Dump()` in `tools/cpp-golden/golden.cc`; when adding parser output, extend both dumps. Upstream quirks visible in the parser output are kept on purpose (e.g. transport feedback blocks lose their SSRCs through TransportFeedback's move constructor).
 
 ## Conventions
 

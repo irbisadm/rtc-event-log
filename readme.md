@@ -34,7 +34,10 @@ yarn typecheck
 yarn build         # dist/index.mjs + types/index.d.ts
 yarn gen:proto     # regenerate src/gen from proto/ (needs protoc)
 sh tools/cpp-vectors/build.sh   # refresh encoder test vectors from the C++ in cpp/ (needs c++ and abseil)
+sh tools/cpp-golden/build.sh    # rebuild the golden logs with the upstream encoder + parser (needs clang++, cmake, ninja, abseil, protobuf, gtest)
 ```
+
+`test/logging/rtc-event-log/golden/` holds logs written by the upstream C++ encoder together with a JSON dump of what the upstream C++ parser reads from them; the test suite checks that the port reads exactly the same.
 
 `cpp/` (gitignored) is a blob-less sparse clone of libwebrtc at the pinned revision, used as the porting reference:
 

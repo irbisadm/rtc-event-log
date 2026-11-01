@@ -651,6 +651,11 @@ function storeRtcpBlocks(timestampUs: number, packet: Uint8Array, lists: RtcpBlo
       if (!parsedBlock.transportFeedback.parse(header)) {
         return ParseStatus.error("parsed_block.transport_feedback.Parse(header)");
       }
+      // Upstream stores the block with push_back(std::move(parsed_block)), and
+      // TransportFeedback's move constructor does not move the Rtpfb base: the
+      // stored feedback has sender and media SSRC 0. Kept for parity.
+      parsedBlock.transportFeedback.setSenderSsrc(0);
+      parsedBlock.transportFeedback.setMediaSsrc(0);
       lists.transportFeedback.push(parsedBlock);
     } else if (header.type() === Rtpfb.kPacketType && header.fmt() === CongestionControlFeedback.kFeedbackMessageType) {
       const feedback = new CongestionControlFeedback();
