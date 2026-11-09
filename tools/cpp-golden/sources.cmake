@@ -1,0 +1,65 @@
+# Upstream sources needed by the generator, relative to cpp/.
+set(WEBRTC_SOURCES
+  logging/rtc_event_log/rtc_event_log_parser.cc
+  logging/rtc_event_log/rtc_event_log_unittest_helper.cc
+  logging/rtc_event_log/rtc_stream_config.cc
+  logging/rtc_event_log/rtc_event_processor.cc
+  logging/rtc_event_log/dependency_descriptor_encoder_decoder.cc
+  logging/rtc_event_log/encoder/bit_writer.cc
+  logging/rtc_event_log/encoder/blob_encoding.cc
+  logging/rtc_event_log/encoder/delta_encoding.cc
+  logging/rtc_event_log/encoder/optional_blob_encoding.cc
+  logging/rtc_event_log/encoder/rtc_event_log_encoder_common.cc
+  logging/rtc_event_log/encoder/rtc_event_log_encoder_new_format.cc
+  logging/rtc_event_log/encoder/rtc_event_log_encoder_v3.cc
+  logging/rtc_event_log/encoder/var_int.cc
+  modules/rtp_rtcp/source/rtcp_packet.cc
+  modules/rtp_rtcp/source/rtp_packet.cc
+  modules/rtp_rtcp/source/rtp_packet_received.cc
+  modules/rtp_rtcp/source/rtp_packet_to_send.cc
+  modules/rtp_rtcp/source/rtp_header_extensions.cc
+  modules/rtp_rtcp/source/rtp_header_extension_map.cc
+  modules/rtp_rtcp/source/rtp_dependency_descriptor_extension.cc
+  modules/rtp_rtcp/source/rtp_dependency_descriptor_reader.cc
+  modules/rtp_rtcp/source/rtp_dependency_descriptor_writer.cc
+  modules/rtp_rtcp/source/rtp_generic_frame_descriptor.cc
+  modules/rtp_rtcp/source/rtp_generic_frame_descriptor_extension.cc
+  modules/rtp_rtcp/source/rtp_video_layers_allocation_extension.cc
+  modules/rtp_rtcp/source/ntp_time_util.cc
+  api/rtp_parameters.cc
+  media/base/media_constants.cc
+  api/rtp_headers.cc
+  api/field_trials.cc
+  rtc_base/checks.cc
+  rtc_base/random.cc
+  rtc_base/bit_buffer.cc
+  rtc_base/bitstream_reader.cc
+  rtc_base/copy_on_write_buffer.cc
+  rtc_base/time_utils.cc
+  rtc_base/system_time.cc
+  rtc_base/strings/string_builder.cc
+  rtc_base/system/file_wrapper.cc
+  system_wrappers/source/clock.cc
+  api/environment/force_test_environment.cc
+  api/video/color_space.cc
+  api/video/hdr_metadata.cc
+  api/video/video_content_type.cc
+  api/video/video_timing.cc
+  api/field_trials_registry.cc
+  api/media_types.cc
+  api/rtc_error.cc
+  api/units/data_rate.cc
+  api/units/data_size.cc
+  api/units/frequency.cc
+  api/units/time_delta.cc
+  api/units/timestamp.cc
+  modules/audio_coding/audio_network_adaptor/audio_network_adaptor_config.cc
+  modules/rtp_rtcp/source/leb128.cc
+  rtc_base/ref_counter.cc
+  rtc_base/string_encode.cc
+)
+file(GLOB _events RELATIVE "${CMAKE_CURRENT_LIST_DIR}/../../cpp"
+  "${CMAKE_CURRENT_LIST_DIR}/../../cpp/logging/rtc_event_log/events/*.cc"
+  "${CMAKE_CURRENT_LIST_DIR}/../../cpp/modules/rtp_rtcp/source/rtcp_packet/*.cc")
+list(FILTER _events EXCLUDE REGEX "_unittest\\.cc$")
+list(APPEND WEBRTC_SOURCES ${_events})
